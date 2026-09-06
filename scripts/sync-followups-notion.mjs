@@ -1,7 +1,14 @@
 #!/usr/bin/env node
-// Sincroniza a aba "Follow-up da semana" (Google Sheets, lida via export CSV
-// público — sem credenciais do Google) com a database "Gestão em Movimento -
-// Relatórios Semanais" no Notion.
+// Sincroniza as abas "Follow-up da semana" e "Outros Follow-ups" (Google
+// Sheets, lidas via export CSV público — sem credenciais do Google) com a
+// database "Gestão em Movimento - Relatórios Semanais" no Notion.
+//
+// "Outros Follow-ups" (Plano de Ação Vivendas) foi adicionada em 2026-09-05
+// — faltava desde sempre esse espelho (nem o Apps Script antigo fazia isso
+// pro Plano de Ação, só pros condomínios normais em "Follow-up da semana");
+// a linha "Residencial Vivendas Home Club — Relatório Gerencial do Plano de
+// Ação" tinha ficado parada numa semana antiga sem link até o backfill
+// manual + esta correção.
 //
 // Roda via GitHub Actions (.github/workflows/sync-followups-notion.yml),
 // independente do Apps Script — o Apps Script tem cota diária de
@@ -15,6 +22,7 @@
 const SPREADSHEET_ID =
   process.env.REGISTRY_SPREADSHEET_ID || "1fEkPgTf6oGYknWEP6zzi8eyBTpoDDQR0goJg1D_Wed0";
 const FOLLOWUPS_GID = process.env.FOLLOWUPS_GID || "1720412368";
+const OUTROS_FOLLOWUPS_GID = process.env.OUTROS_FOLLOWUPS_GID || "22211610";
 const NOTION_FOLLOWUPS_DB_ID = "3c1e69ba114f8020b465f0db2be179ee";
 const NOTION_VERSION = "2022-06-28";
 const NOTION_TOKEN = process.env.NOTION_TOKEN;
@@ -68,10 +76,10 @@ function parseCsv(text) {
   return rows;
 }
 
-async function fetchFollowUpsCsv() {
-  const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${FOLLOWUPS_GID}`;
+async function fetchCsv(gid) {
+  const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv&gid=${gid}`;
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Falha ao ler planilha: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`Falha ao ler planilha (gid ${gid}): HTTP ${res.status}`);
   return parseCsv(await res.text());
 }
 
@@ -132,31 +140,49 @@ function montarPropriedades(condominio, semana, dataInicio, dataFim, link) {
   };
 }
 
-async function main() {
-  console.log("Lendo planilha de follow-ups...");
-  const [header, ...body] = await fetchFollowUpsCsv();
-  if (!header) {
-    console.log("Planilha vazia.");
-    return;
-  }
+// "nome" na aba "Outros Follow-ups" é um rótulo curto pra exibição na
+// planilha ("Vivendas - Plano de Ação") — diferente do título já cadastrado
+// na linha correspondente na database Notion ("Residencial Vivendas Home
+// Club — Relatório Gerencial do Plano de Ação", criada manualmente antes
+// desta automação). Sem esse mapeamento, sincronizaria como uma linha nova
+// duplicada em vez de atualizar a existente.
+const NOME_NOTION_POR_NOME_PLANILHA = {
+  "Vivendas - Plano de Ação": "Residencial Vivendas Home Club — Relatório Gerencial do Plano de Ação",
+};
 
-  const iCondominio = col(header, "condominio", "condomínio", "Condominio", "Condomínio");
+// "Follow-up da semana" usa a coluna "condominio"; "Outros Follow-ups" usa
+// "nome" (mesmo dado — nome de exibição —, header diferente porque essa aba
+// não é exclusiva de condomínio). col() aceita os dois.
+function linhasDoCsv([header, ...body]) {
+  if (!header) return [];
+  const iCondominio = col(header, "condominio", "condomínio", "Condominio", "Condomínio", "nome");
   const iSemana = col(header, "semana", "Semana");
   const iLink = col(header, "link-follow-up", "URL");
   const iInicio = col(header, "data-inicio", "Data Início");
   const iTermino = col(header, "data-termino", "Data Término");
 
-  const linhas = body
-    .map((r) => ({
-      condominio: (r[iCondominio] ?? "").trim(),
-      semana: Number((r[iSemana] ?? "").trim()),
-      link: (r[iLink] ?? "").trim(),
-      dataInicio: (r[iInicio] ?? "").trim(),
-      dataFim: (r[iTermino] ?? "").trim(),
-    }))
+  return body
+    .map((r) => {
+      const nomePlanilha = (r[iCondominio] ?? "").trim();
+      return {
+        condominio: NOME_NOTION_POR_NOME_PLANILHA[nomePlanilha] || nomePlanilha,
+        semana: Number((r[iSemana] ?? "").trim()),
+        link: (r[iLink] ?? "").trim(),
+        dataInicio: (r[iInicio] ?? "").trim(),
+        dataFim: (r[iTermino] ?? "").trim(),
+      };
+    })
     .filter((r) => r.condominio && Number.isFinite(r.semana) && r.link);
+}
 
-  console.log(`${linhas.length} linha(s) na planilha.`);
+async function main() {
+  console.log("Lendo planilhas de follow-ups...");
+  const linhas = [
+    ...linhasDoCsv(await fetchCsv(FOLLOWUPS_GID)),
+    ...linhasDoCsv(await fetchCsv(OUTROS_FOLLOWUPS_GID)),
+  ];
+
+  console.log(`${linhas.length} linha(s) nas planilhas.`);
 
   console.log("Buscando páginas já existentes no Notion...");
   const existentes = await fetchTodasPaginasExistentes();
