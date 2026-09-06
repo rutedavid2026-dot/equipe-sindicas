@@ -60,6 +60,12 @@ const PLANO_ACAO_VIVENDAS_DB_ID = "3c2e69ba114f80cb9c62f1a0843dcf73";
 const PLANO_ACAO_VIVENDAS_SHEET_NAME = "Vivendas - Plano de Ação";
 const PLANO_ACAO_VIVENDAS_ID = "vivendas-plano-de-acao";
 const PLANO_ACAO_VIVENDAS_NOME = "Vivendas - Plano de Ação";
+// Nome exato da linha já existente na database Notion "Relatórios Semanais"
+// (criada manualmente antes desta automação, semana 36, sem link) — usado só
+// no espelho pro Notion, pra atualizar essa linha em vez de criar uma nova
+// com nome diferente. Diferente de PLANO_ACAO_VIVENDAS_NOME (usado na aba
+// "Outros Follow-ups" da planilha, que já tinha esse nome curto desde antes).
+const PLANO_ACAO_VIVENDAS_NOME_NOTION = "Residencial Vivendas Home Club — Relatório Gerencial do Plano de Ação";
 const OUTROS_FOLLOWUPS_SHEET_NAME = "Outros Follow-ups";
 const HEADERS_OUTROS_FOLLOWUP = ["nome", "semana", "link-follow-up", "data-inicio", "data-termino"];
 
@@ -463,7 +469,7 @@ async function buscarPaginasComTokens(tokens, databaseId) {
 // grava o snapshot da semana na aba própria + registra o link em "Outros
 // Follow-ups" (dedup por nome+semana, mesmo padrão de "Follow-up da
 // semana").
-async function capturarPlanoDeAcaoVivendas(token, meta, notionTokens, semana) {
+async function capturarPlanoDeAcaoVivendas(token, meta, notionTokens, semana, tokenRelatorioSemanal) {
   await garantirAbaComCabecalho(token, meta, PLANO_ACAO_VIVENDAS_SHEET_NAME, HEADERS_PLANO_ACAO);
   const outrosSheet = await garantirAbaComCabecalho(token, meta, OUTROS_FOLLOWUPS_SHEET_NAME, HEADERS_OUTROS_FOLLOWUP);
 
@@ -518,6 +524,16 @@ async function capturarPlanoDeAcaoVivendas(token, meta, notionTokens, semana) {
   await appendValues(token, `'${OUTROS_FOLLOWUPS_SHEET_NAME}'!A1:E`, [
     [PLANO_ACAO_VIVENDAS_NOME, semana.n, link, semana.start, semana.end],
   ]);
+
+  // Espelho na database Notion "Relatórios Semanais" — faltava desde sempre
+  // (nem o Apps Script antigo fazia isso pro Plano de Ação Vivendas, só pros
+  // condomínios normais); a linha da semana 36 tinha ficado parada com o
+  // link vazio. Usa o nome exato já cadastrado manualmente nessa database
+  // (PLANO_ACAO_VIVENDAS_NOME_NOTION) pra atualizar a linha existente em vez
+  // de criar uma duplicata com nome diferente.
+  if (tokenRelatorioSemanal) {
+    await sincronizarFollowUpNotion(tokenRelatorioSemanal, PLANO_ACAO_VIVENDAS_NOME_NOTION, semana, link);
+  }
 }
 
 // ---------- Semana / links (mesmo cálculo de CapturaSemanal.gs/Config.gs) ----------
@@ -732,7 +748,7 @@ async function main() {
   if (!filtroCondominio || filtroCondominio === PLANO_ACAO_VIVENDAS_ID) {
     try {
       console.log("Buscando Plano de Ação Vivendas...");
-      await capturarPlanoDeAcaoVivendas(token, meta, notionTokens, semana);
+      await capturarPlanoDeAcaoVivendas(token, meta, notionTokens, semana, tokenRelatorioSemanal);
       processados++;
     } catch (err) {
       erros.push(`Plano de Ação Vivendas: ${err.message}`);
