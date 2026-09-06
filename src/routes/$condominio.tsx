@@ -210,7 +210,10 @@ function ReportPage() {
       ),
     [abertas],
   );
-  const concluidasRows = useMemo(() => filtered.filter((r) => isFechada(r.status)), [filtered]);
+  const concluidasRows = useMemo(
+    () => filtered.filter((r) => statusBucket(r.status) === "concluido"),
+    [filtered],
+  );
   const construtora = useMemo(
     () =>
       filtered.filter(
@@ -300,7 +303,7 @@ function ReportPage() {
 
             <DemandaSectionTable
               title="Tarefas Concluídas"
-              description="Tarefas já concluídas ou canceladas, de todas as prioridades."
+              description="Tarefas já concluídas, de todas as prioridades."
               rows={concluidasRows}
             />
 

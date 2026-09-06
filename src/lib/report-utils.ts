@@ -1,7 +1,12 @@
 import type { Demanda } from "./notion.functions";
 
 export const STATUS_CONCLUIDO = ["Concluído", "Feito"];
-export const STATUS_CANCELADO = ["Cancelado"];
+// "Cancelada" (não só "Cancelado") existe de verdade em bases de condomínios
+// diferentes — normalizeForMatch só cobre acento/maiúscula, não a troca de
+// gênero. Sem as duas formas, esses itens caíam no bucket "pendente" por
+// engano (confirmado em 2026-09-05: 3 grafias em uso — Cancelada, Cancelado,
+// cancelado).
+export const STATUS_CANCELADO = ["Cancelado", "Cancelada"];
 export const STATUS_ANDAMENTO = [
   "Em andamento",
   "Agendado",

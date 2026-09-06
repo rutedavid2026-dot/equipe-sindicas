@@ -3,7 +3,10 @@ import { fetchDemandas } from "../notion";
 import type { Demanda } from "../notion";
 
 const STATUS_CONCLUIDO = ["Concluído", "Feito"];
-const STATUS_CANCELADO = ["Cancelado"];
+// "Cancelada" (não só "Cancelado") existe de verdade em bases de
+// condomínios diferentes — troca de gênero, não coberta por
+// normalizeStatus (só acento/maiúscula). Ver src/lib/report-utils.ts.
+const STATUS_CANCELADO = ["Cancelado", "Cancelada"];
 const STATUS_ANDAMENTO = ["Em andamento", "Agendado", "Orçamento", "Orçando", "Reaberto", "Sempre"];
 
 // Normaliza maiúsculas/acentos antes de comparar: o mesmo status aparece com
