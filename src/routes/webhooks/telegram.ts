@@ -80,6 +80,50 @@ const CONDOMINIOS: Record<string, string> = {
   sunset: "3c4e69ba114f81699ccaeb754c5d7305",
 };
 
+// Nome de exibição exato (e valor gravado no campo "Condomínio" do Notion)
+// pra cada chave de CONDOMINIOS — checado database por database via API, não
+// adivinhado, porque a grafia real do Notion diverge da chave em alguns casos
+// (ex.: "Saint Exupery" sem acento, "Páteo Campeche" com acento diferente do
+// esperado, "SUNSET" em caixa alta). "Iconic", "Thai Beach" e "Boulevard
+// Atlantique" não puderam ser confirmados (databases não compartilhadas com a
+// integração usada pra essa checagem) — grafia mais provável usada.
+const NOMES_CONDOMINIOS: Record<string, string> = {
+  "miragio cacupé": "Miragio Cacupé",
+  "jazz club": "Jazz Club",
+  "las rozas": "Las Rozas",
+  vivendas: "Vivendas",
+  iconic: "Iconic",
+  "porto dos açores": "Porto dos Açores",
+  "thai beach": "Thai Beach",
+  "bossa nova": "Bossa Nova",
+  "boulevard atlantique": "Boulevard Atlantique",
+  "palm beach": "Palm Beach",
+  malibu: "Malibu",
+  "encantos do mar": "Encantos do Mar",
+  "mar aberto": "Mar Aberto",
+  contemporâneo: "Contemporâneo",
+  rivière: "Rivière",
+  "saint exupéry": "Saint Exupery",
+  "la plage": "La Plage",
+  absoluto: "Absoluto",
+  "dunas do leste": "Dunas do Leste",
+  "riozinho style": "Riozinho Style",
+  "pátéo campeche": "Páteo Campeche",
+  infiniti: "Infiniti",
+  "luiza napoli": "Luiza Napoli",
+  "cora campeche": "Cora Campeche",
+  atlantis: "Atlantis",
+  carrara: "Carrara",
+  "residencial saffira": "Residencial Saffira",
+  moana: "Moana",
+  sunset: "SUNSET",
+};
+
+// A propriedade "Condomínio" quase sempre é select, mas a Bossa Nova é
+// multi_select — sem isso, criar tarefa lá falharia por incompatibilidade de
+// tipo.
+const CONDOMINIO_MULTI_SELECT = new Set(["bossa nova"]);
+
 function notionKey(): string {
   const key = process.env.NOTION_API_KEY_ALERTAS;
   if (!key) throw new Error("NOTION_API_KEY_ALERTAS não configurado nesta implantação.");
@@ -204,6 +248,7 @@ type OpcoesCondominio = {
   prioridade: OpcoesEscolha;
   setor: OpcoesEscolha;
   responsavel: OpcoesResponsavel;
+  condominioTipo: "select" | "multi_select";
 };
 
 // Pessoas do tipo "people" não têm opções fixas no schema (é uma referência a
@@ -233,7 +278,10 @@ async function opcoesResponsavelPeople(
   return [...vistos.entries()].map(([id, nome]) => ({ id, nome }));
 }
 
-async function buscarSchemaCondominio(databaseId: string): Promise<OpcoesCondominio> {
+async function buscarSchemaCondominio(
+  databaseId: string,
+  chave: string,
+): Promise<OpcoesCondominio> {
   type PropDef = {
     type: string;
     status?: { options: { name: string }[] };
@@ -273,6 +321,7 @@ async function buscarSchemaCondominio(databaseId: string): Promise<OpcoesCondomi
     prioridade: opcoesEscolha("Prioridade"),
     setor: opcoesEscolha("Setor"),
     responsavel,
+    condominioTipo: CONDOMINIO_MULTI_SELECT.has(chave) ? "multi_select" : "select",
   };
 }
 
@@ -394,6 +443,8 @@ type CriarTarefaInput = {
   condominio: string;
   tarefa: string;
   dias: number;
+  databaseId?: string;
+  condominioTipo?: "select" | "multi_select";
   statusPadrao?: string;
   responsavelValor?: ResponsavelValor;
   prioridade?: string;
@@ -406,6 +457,8 @@ async function criarTarefa({
   condominio,
   tarefa,
   dias,
+  databaseId: databaseIdInformado,
+  condominioTipo,
   statusPadrao,
   responsavelValor,
   prioridade,
@@ -413,7 +466,11 @@ async function criarTarefa({
   setor,
   setorTipo,
 }: CriarTarefaInput): Promise<string> {
-  const databaseId = CONDOMINIOS[condominio.toLowerCase()];
+  // databaseId já vem resolvido do fluxo de botões (evita depender de
+  // round-trip por nome, que falha pra condomínios cuja grafia real no Notion
+  // diverge da chave — ex.: "Saint Exupery" sem acento); só a camada 1
+  // (atalho de texto livre) precisa resolver aqui.
+  const databaseId = databaseIdInformado ?? CONDOMINIOS[condominio.toLowerCase()];
   if (!databaseId) {
     const nomes = Object.keys(CONDOMINIOS).join(", ");
     throw new Error(`Condomínio "${condominio}" não reconhecido. Condomínios válidos: ${nomes}`);
@@ -424,7 +481,7 @@ async function criarTarefa({
     Tarefas: { title: [{ text: { content: tarefa } }] },
     "Data de Início": { date: { start: hoje } },
     "Previsão (em dias)": { number: dias },
-    Condomínio: { select: { name: condominio } },
+    Condomínio: valorEscolha(condominioTipo ?? "select", condominio),
   };
   if (statusPadrao) properties["Status"] = { status: { name: statusPadrao } };
   if (prioridade) properties["Prioridade"] = valorEscolha(prioridadeTipo ?? "select", prioridade);
@@ -562,10 +619,11 @@ async function iniciarEscolhaTarefa(
   chatId: number,
   condominio: string,
   databaseId: string,
+  chave: string,
 ): Promise<void> {
   const [tarefas, schema] = await Promise.all([
     buscarTarefasAbertas(databaseId),
-    buscarSchemaCondominio(databaseId),
+    buscarSchemaCondominio(databaseId, chave),
   ]);
   if (tarefas.length === 0) {
     await responderTelegram(chatId, `Nenhuma tarefa em aberto em ${condominio}.`, MENU_PRINCIPAL);
@@ -593,17 +651,20 @@ async function iniciarEscolhaCondominio(
   chatId: number,
   fluxo: "nova" | "atualizar",
 ): Promise<void> {
-  const condominios = await condominiosDaSindica(chatId);
-  if (condominios.length === 0) {
+  const autorizada = (await condominiosDaSindica(chatId)).length > 0;
+  if (!autorizada) {
     await responderTelegram(
       chatId,
-      "Você não está cadastrada como síndica ativa de nenhum condomínio. Fale com a equipe pra ser adicionada.",
+      "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
     );
     return;
   }
+  const chaves = Object.keys(CONDOMINIOS).sort((a, b) =>
+    NOMES_CONDOMINIOS[a].localeCompare(NOMES_CONDOMINIOS[b], "pt-BR"),
+  );
   await responderTelegram(chatId, "🏢 Qual condomínio?", {
-    inline_keyboard: condominios.map((nome) => [
-      { text: nome, callback_data: `condo:${fluxo}:${nome}` },
+    inline_keyboard: chaves.map((chave) => [
+      { text: NOMES_CONDOMINIOS[chave], callback_data: `condo:${fluxo}:${chave}` },
     ]),
   });
 }
@@ -642,16 +703,17 @@ async function tratarCallbackQuery(callbackQuery: {
     const resto = data.slice("condo:".length);
     const separador = resto.indexOf(":");
     const fluxo = resto.slice(0, separador);
-    const condominio = resto.slice(separador + 1);
-    const databaseId = CONDOMINIOS[condominio.toLowerCase()];
+    const chave = resto.slice(separador + 1);
+    const databaseId = CONDOMINIOS[chave];
     if (!databaseId) return;
+    const condominio = NOMES_CONDOMINIOS[chave] ?? chave;
 
     if (fluxo === "nova") {
-      const opcoes = await buscarSchemaCondominio(databaseId);
+      const opcoes = await buscarSchemaCondominio(databaseId, chave);
       await salvarSessao(chatId, { fluxo: "nova", step: "tarefa", condominio, databaseId, opcoes });
       await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
     } else {
-      await iniciarEscolhaTarefa(chatId, condominio, databaseId);
+      await iniciarEscolhaTarefa(chatId, condominio, databaseId, chave);
     }
     return;
   }
@@ -704,6 +766,8 @@ async function tratarCallbackQuery(callbackQuery: {
       condominio: sessao.condominio,
       tarefa: sessao.tarefa!,
       dias: sessao.dias!,
+      databaseId: sessao.databaseId,
+      condominioTipo: sessao.opcoes.condominioTipo,
       statusPadrao: sessao.opcoes.statusPadrao,
       responsavelValor: sessao.responsavelValor,
       prioridade: sessao.prioridade,
