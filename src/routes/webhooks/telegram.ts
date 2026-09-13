@@ -1,15 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 // Recebe mensagens do bot do Telegram (@equipesindicas_bot) e permite criar
-// tarefas direto pelo chat, sem abrir o Notion. Camada 1 (validação rápida,
-// sem deploy ainda): comando único de texto, sem botões — a versão com
-// botões/múltiplos passos (camada 2) exige guardar estado de conversa entre
-// mensagens, e só faz sentido implementar depois que esta estiver publicada
-// e o webhook do Telegram registrado (setWebhook), porque conversas de
-// verdade acontecem em requisições HTTP separadas.
+// tarefas direto pelo chat, sem abrir o Notion.
 //
-// Formato do comando:
-//   /novatarefa Nome do Condomínio | Nome da tarefa | Previsão em dias
+// Camada 2: fluxo com botões — /novatarefa (sem argumentos) pergunta o
+// condomínio (só os que a síndica gerencia, via database "Síndicas"), depois
+// o nome da tarefa e a previsão em dias, um passo por mensagem. O estado
+// entre uma mensagem e outra fica na database "Sessões (bot Telegram)" (1
+// linha por chat_id) — necessário porque cada mensagem chega como uma
+// requisição HTTP separada e isolada (sem memória em processo entre elas,
+// rodando em edge/serverless).
+//
+// Camada 1 (comando único, ainda funciona): /novatarefa Condomínio | Tarefa
+// | Dias — atalho pra quem já sabe o formato, sem passar pelos botões.
 //
 // Autorização: só responde a chat_ids cadastrados como síndica ativa na
 // database "Síndicas" (mesma usada pela automação de alertas em
@@ -27,6 +30,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 const NOTION_VERSION = "2022-06-28";
 const SINDICAS_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
+const SESSOES_DB_ID = "3dae69ba114f8170aea1c56a019ed184";
 
 // Mesma lista de scripts/alertar-tarefas-atrasadas.mjs — duplicada de
 // propósito (runtimes diferentes: Cloudflare Worker aqui, Node no GitHub
@@ -94,15 +98,33 @@ async function notionFetch(path: string, options: RequestInit = {}) {
   return json;
 }
 
-async function responderTelegram(chatId: number, texto: string): Promise<void> {
+async function responderTelegram(
+  chatId: number,
+  texto: string,
+  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
+): Promise<void> {
   await fetch(`https://api.telegram.org/bot${telegramToken()}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: texto }),
+    body: JSON.stringify({ chat_id: chatId, text: texto, reply_markup: replyMarkup }),
   });
 }
 
-async function sindicaAutorizada(chatId: number): Promise<boolean> {
+// Tira o "carregando..." do botão no app do Telegram — não afeta a lógica,
+// só a experiência de quem clicou (sem isso o botão fica "pensando" até dar
+// timeout no cliente).
+async function responderCallback(callbackQueryId: string): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${telegramToken()}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackQueryId }),
+  });
+}
+
+// Retorna os condomínios que essa síndica gerencia (vazio = não autorizada
+// ou nenhum condomínio mapeado — os dois casos tratados como "não pode usar
+// o bot" pelo chamador).
+async function condominiosDaSindica(chatId: number): Promise<string[]> {
   const json = (await notionFetch(`databases/${SINDICAS_DB_ID}/query`, {
     method: "POST",
     body: JSON.stringify({
@@ -113,8 +135,58 @@ async function sindicaAutorizada(chatId: number): Promise<boolean> {
         ],
       },
     }),
-  })) as { results: unknown[] };
-  return json.results.length > 0;
+  })) as { results: { properties: Record<string, { multi_select?: { name: string }[] }> }[] };
+
+  const nomes = new Set<string>();
+  for (const page of json.results) {
+    for (const opt of page.properties["Condominios"]?.multi_select ?? []) {
+      nomes.add(opt.name);
+    }
+  }
+  return [...nomes];
+}
+
+type Sessao = { step: "aguardando_tarefa" | "aguardando_dias"; condominio: string; tarefa?: string };
+
+// 1 linha por chat_id na database "Sessões (bot Telegram)" — busca a
+// existente (se houver) pra decidir entre criar ou atualizar, mesmo padrão
+// de fetchTodasPaginasExistentes em sync-followups-notion.mjs.
+async function buscarLinhaSessao(chatId: number): Promise<{ pageId: string; sessao: Sessao | null } | null> {
+  const json = (await notionFetch(`databases/${SESSOES_DB_ID}/query`, {
+    method: "POST",
+    body: JSON.stringify({ filter: { property: "ChatId", title: { equals: String(chatId) } } }),
+  })) as { results: { id: string; properties: Record<string, { rich_text?: { plain_text: string }[] }> }[] };
+
+  if (json.results.length === 0) return null;
+  const page = json.results[0];
+  const texto = page.properties["Estado"]?.rich_text?.[0]?.plain_text;
+  return { pageId: page.id, sessao: texto ? (JSON.parse(texto) as Sessao) : null };
+}
+
+async function salvarSessao(chatId: number, sessao: Sessao): Promise<void> {
+  const existente = await buscarLinhaSessao(chatId);
+  const properties = { Estado: { rich_text: [{ text: { content: JSON.stringify(sessao) } }] } };
+  if (existente) {
+    await notionFetch(`pages/${existente.pageId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
+  } else {
+    await notionFetch("pages", {
+      method: "POST",
+      body: JSON.stringify({
+        parent: { database_id: SESSOES_DB_ID },
+        properties: { ChatId: { title: [{ text: { content: String(chatId) } }] }, ...properties },
+      }),
+    });
+  }
+}
+
+async function limparSessao(chatId: number): Promise<void> {
+  const existente = await buscarLinhaSessao(chatId);
+  if (existente) {
+    await notionFetch(`pages/${existente.pageId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties: { Estado: { rich_text: [] } } }),
+    });
+  }
 }
 
 type ComandoNovaTarefa = { condominio: string; tarefa: string; dias: number };
@@ -160,6 +232,98 @@ async function criarTarefa({ condominio, tarefa, dias }: ComandoNovaTarefa): Pro
   return pagina.url;
 }
 
+async function iniciarEscolhaCondominio(chatId: number): Promise<void> {
+  const condominios = await condominiosDaSindica(chatId);
+  if (condominios.length === 0) {
+    await responderTelegram(
+      chatId,
+      "Você não está cadastrada como síndica ativa de nenhum condomínio. Fale com a equipe pra ser adicionada.",
+    );
+    return;
+  }
+  if (condominios.length === 1) {
+    await salvarSessao(chatId, { step: "aguardando_tarefa", condominio: condominios[0] });
+    await responderTelegram(chatId, `🏢 ${condominios[0]}\n\n📝 Qual o nome da tarefa?`);
+    return;
+  }
+  await responderTelegram(chatId, "🏢 Qual condomínio?", {
+    inline_keyboard: condominios.map((nome) => [{ text: nome, callback_data: `condo:${nome}` }]),
+  });
+}
+
+async function tratarCallbackQuery(callbackQuery: {
+  id: string;
+  data?: string;
+  message?: { chat?: { id?: number } };
+}): Promise<void> {
+  await responderCallback(callbackQuery.id);
+  const chatId = callbackQuery.message?.chat?.id;
+  if (!chatId || !callbackQuery.data?.startsWith("condo:")) return;
+
+  const condominio = callbackQuery.data.slice("condo:".length);
+  await salvarSessao(chatId, { step: "aguardando_tarefa", condominio });
+  await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
+}
+
+async function tratarMensagem(chatId: number, texto: string): Promise<void> {
+  const autorizada = (await condominiosDaSindica(chatId)).length > 0;
+  if (!autorizada) {
+    await responderTelegram(
+      chatId,
+      "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
+    );
+    return;
+  }
+
+  // Atalho camada 1 — comando de uma linha só, sem passar pelo fluxo de botões.
+  if (texto.includes("|")) {
+    const comando = parsearComando(texto);
+    if ("erro" in comando) {
+      await responderTelegram(chatId, comando.erro);
+      return;
+    }
+    const url = await criarTarefa(comando);
+    await responderTelegram(
+      chatId,
+      `✅ Tarefa criada: ${comando.tarefa}\n🏢 ${comando.condominio}\n📅 Previsão: ${comando.dias} dia(s)\n\n🔗 ${url}`,
+    );
+    return;
+  }
+
+  if (/^\/novatarefa(@\w+)?\s*$/i.test(texto)) {
+    await iniciarEscolhaCondominio(chatId);
+    return;
+  }
+
+  const linhaSessao = await buscarLinhaSessao(chatId);
+  const sessao = linhaSessao?.sessao;
+  if (!sessao) {
+    // Nenhuma conversa em andamento e não é um comando reconhecido — ignora
+    // silenciosamente (evita responder a qualquer mensagem solta no chat).
+    return;
+  }
+
+  if (sessao.step === "aguardando_tarefa") {
+    await salvarSessao(chatId, { step: "aguardando_dias", condominio: sessao.condominio, tarefa: texto });
+    await responderTelegram(chatId, "📅 Previsão em quantos dias?");
+    return;
+  }
+
+  if (sessao.step === "aguardando_dias") {
+    const dias = Number(texto.trim());
+    if (!Number.isFinite(dias) || dias <= 0) {
+      await responderTelegram(chatId, `Previsão inválida: "${texto}". Manda só o número de dias (ex: 3).`);
+      return;
+    }
+    const url = await criarTarefa({ condominio: sessao.condominio, tarefa: sessao.tarefa!, dias });
+    await limparSessao(chatId);
+    await responderTelegram(
+      chatId,
+      `✅ Tarefa criada: ${sessao.tarefa}\n🏢 ${sessao.condominio}\n📅 Previsão: ${dias} dia(s)\n\n🔗 ${url}`,
+    );
+  }
+}
+
 export const Route = createFileRoute("/webhooks/telegram")({
   server: {
     handlers: {
@@ -171,42 +335,29 @@ export const Route = createFileRoute("/webhooks/telegram")({
           return new Response("JSON inválido", { status: 400 });
         }
 
-        const message = update.message as { chat?: { id?: number }; text?: string } | undefined;
-        const chatId = message?.chat?.id;
-        const texto = message?.text ?? "";
-
-        if (!chatId || !texto.startsWith("/novatarefa")) {
-          // Ignora silenciosamente qualquer outra mensagem/tipo de update —
-          // Telegram exige 200 OK mesmo quando não fazemos nada com o evento.
-          return new Response("ok", { status: 200 });
-        }
-
         try {
-          const autorizada = await sindicaAutorizada(chatId);
-          if (!autorizada) {
-            await responderTelegram(
-              chatId,
-              "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
-            );
+          const callbackQuery = update.callback_query as
+            | { id: string; data?: string; message?: { chat?: { id?: number } } }
+            | undefined;
+          if (callbackQuery) {
+            await tratarCallbackQuery(callbackQuery);
             return new Response("ok", { status: 200 });
           }
 
-          const comando = parsearComando(texto);
-          if ("erro" in comando) {
-            await responderTelegram(chatId, comando.erro);
-            return new Response("ok", { status: 200 });
+          const message = update.message as { chat?: { id?: number }; text?: string } | undefined;
+          const chatId = message?.chat?.id;
+          const texto = message?.text ?? "";
+          if (chatId && texto) {
+            await tratarMensagem(chatId, texto);
           }
-
-          const url = await criarTarefa(comando);
-          await responderTelegram(
-            chatId,
-            `✅ Tarefa criada: ${comando.tarefa}\n🏢 ${comando.condominio}\n📅 Previsão: ${comando.dias} dia(s)\n\n🔗 ${url}`,
-          );
         } catch (err) {
           console.error("webhooks/telegram:", err);
-          await responderTelegram(chatId, `❌ Erro ao criar tarefa: ${(err as Error).message}`);
+          const chatId = (update.message as { chat?: { id?: number } } | undefined)?.chat?.id;
+          if (chatId) await responderTelegram(chatId, `❌ Erro: ${(err as Error).message}`);
         }
 
+        // Telegram exige 200 OK mesmo quando ignoramos o evento (tipo de
+        // update não tratado, mensagem sem sessão ativa, etc.).
         return new Response("ok", { status: 200 });
       },
     },
