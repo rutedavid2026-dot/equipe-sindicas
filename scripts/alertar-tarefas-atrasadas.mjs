@@ -4,6 +4,13 @@
 // protótipo que foi validado manualmente no n8n (MVP Equipe Síndicas) —
 // mesma lógica, sem precisar manter um servidor n8n rodando.
 //
+// Roteamento: a database Notion "Síndicas" mapeia cada síndica (nome +
+// Telegram Chat ID) para os condomínios que ela atende (multi_select,
+// suporta N:N — uma síndica pode cobrir vários condomínios, e vice-versa).
+// Consultada ao vivo a cada execução (é 1 chamada extra, sem custo real) —
+// editar uma linha lá já vale na próxima execução, sem passo de "salvar".
+// Condomínio sem nenhuma síndica ativa mapeada: não envia, só registra erro.
+//
 // Deduplicação: cada tarefa alertada vira uma página na database "Alertas
 // Enviados" (Notion), indexada pelo Task Page ID da tarefa original. Antes
 // de mandar mensagem, checa se já existe — nunca reenvia a mesma tarefa.
@@ -11,18 +18,17 @@
 // Roda via GitHub Actions (.github/workflows/alertar-tarefas-atrasadas.yml).
 //
 // Uso local:
-//   NOTION_API_KEY=ntn_... TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... \
-//     node scripts/alertar-tarefas-atrasadas.mjs
+//   NOTION_API_KEY=ntn_... TELEGRAM_BOT_TOKEN=... node scripts/alertar-tarefas-atrasadas.mjs
 
 const NOTION_VERSION = "2022-06-28";
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const ALERTAS_ENVIADOS_DB_ID = "3d9e69ba114f81c0b568eabc3e254819";
+const SINDICAS_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
 
-if (!NOTION_API_KEY || !TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+if (!NOTION_API_KEY || !TELEGRAM_BOT_TOKEN) {
   console.error(
-    "Defina NOTION_API_KEY, TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID (secrets do GitHub Actions ou variáveis de ambiente locais).",
+    "Defina NOTION_API_KEY e TELEGRAM_BOT_TOKEN (secrets do GitHub Actions ou variáveis de ambiente locais).",
   );
   process.exit(1);
 }
@@ -120,6 +126,36 @@ async function buscarPageIdsJaAlertados() {
   return idsAlertados;
 }
 
+// Monta um Map condominio -> [chatId, ...] a partir das síndicas ativas.
+// Uma síndica pode aparecer em vários condomínios (multi_select) e um
+// condomínio pode ter várias síndicas — cada uma recebe o alerta.
+async function buscarMapaSindicas() {
+  const mapa = new Map();
+  let cursor;
+  do {
+    const body = {
+      filter: { property: "Ativo", checkbox: { equals: true } },
+      page_size: 100,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    };
+    const json = await notionFetch(`databases/${SINDICAS_DB_ID}/query`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    for (const page of json.results) {
+      const chatId = page.properties["Telegram Chat ID"]?.rich_text?.[0]?.plain_text?.trim();
+      const condominios = page.properties["Condominios"]?.multi_select ?? [];
+      if (!chatId) continue;
+      for (const { name } of condominios) {
+        if (!mapa.has(name)) mapa.set(name, new Set());
+        mapa.get(name).add(chatId);
+      }
+    }
+    cursor = json.has_more ? json.next_cursor : null;
+  } while (cursor);
+  return mapa;
+}
+
 function nomeDaTarefa(page) {
   const title = page.properties["Tarefas"]?.title ?? [];
   return title.length > 0 ? title[0].plain_text : "(sem título)";
@@ -134,14 +170,14 @@ function prazoDaTarefa(page) {
   return page.properties["Data Prevista de Conclusão"]?.formula?.string || "(sem data)";
 }
 
-async function enviarTelegram(texto) {
+async function enviarTelegram(chatId, texto) {
   const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: texto }),
+    body: JSON.stringify({ chat_id: chatId, text: texto }),
   });
   const json = await res.json();
-  if (!json.ok) throw new Error(`Telegram API: ${json.description || res.statusText}`);
+  if (!json.ok) throw new Error(`Telegram API (chat_id ${chatId}): ${json.description || res.statusText}`);
 }
 
 function montarMensagem({ tarefa, condominio, prazo, link }) {
@@ -155,7 +191,7 @@ function montarMensagem({ tarefa, condominio, prazo, link }) {
   );
 }
 
-async function registrarAlerta({ tarefa, condominio, pageId }) {
+async function registrarAlerta({ tarefa, condominio, pageId, chatIds }) {
   await notionFetch("pages", {
     method: "POST",
     body: JSON.stringify({
@@ -165,13 +201,17 @@ async function registrarAlerta({ tarefa, condominio, pageId }) {
         "Task Page ID": { rich_text: [{ text: { content: pageId } }] },
         Condominio: { rich_text: [{ text: { content: condominio } }] },
         "Data do Alerta": { date: { start: new Date().toISOString() } },
-        "Chat ID": { rich_text: [{ text: { content: String(TELEGRAM_CHAT_ID) } }] },
+        "Chat ID": { rich_text: [{ text: { content: chatIds.join(", ") } }] },
       },
     }),
   });
 }
 
 async function main() {
+  console.log("Buscando mapeamento de síndicas...");
+  const mapaSindicas = await buscarMapaSindicas();
+  console.log(`${mapaSindicas.size} condomínio(s) com síndica ativa mapeada.`);
+
   console.log("Buscando tarefas já alertadas (deduplicação)...");
   const jaAlertados = await buscarPageIdsJaAlertados();
   console.log(`${jaAlertados.size} tarefa(s) já alertada(s) anteriormente.`);
@@ -199,12 +239,20 @@ async function main() {
         pageId: page.id,
       };
 
+      const chatIds = [...(mapaSindicas.get(nome) ?? [])];
+      if (chatIds.length === 0) {
+        erros.push(`${nome} — ${dados.tarefa}: nenhuma síndica ativa mapeada, alerta não enviado`);
+        continue;
+      }
+
       try {
-        await enviarTelegram(montarMensagem(dados));
-        await registrarAlerta(dados);
+        for (const chatId of chatIds) {
+          await enviarTelegram(chatId, montarMensagem(dados));
+          // Espaça os envios pra não estourar rate-limit da API do Telegram.
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        await registrarAlerta({ ...dados, chatIds });
         enviados++;
-        // Espaça os envios pra não estourar rate-limit da API do Telegram.
-        await new Promise((r) => setTimeout(r, 1000));
       } catch (err) {
         erros.push(`${nome} — ${dados.tarefa}: ${err.message}`);
       }
@@ -213,7 +261,7 @@ async function main() {
 
   console.log(`✅ ${enviados} alerta(s) novo(s) enviado(s).`);
   if (erros.length > 0) {
-    console.log(`❌ ${erros.length} falha(s):`);
+    console.log(`❌ ${erros.length} falha(s)/aviso(s):`);
     erros.forEach((e) => console.log(" - " + e));
     process.exitCode = 1;
   }
