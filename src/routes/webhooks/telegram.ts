@@ -1153,6 +1153,8 @@ export const Route = createFileRoute("/webhooks/telegram")({
                 photo?: { file_id: string }[];
                 video?: { file_id: string; file_name?: string; mime_type?: string };
                 document?: { file_id: string; file_name?: string; mime_type?: string };
+                voice?: { file_id: string; mime_type?: string };
+                audio?: { file_id: string; file_name?: string; mime_type?: string };
               }
             | undefined;
           const chatId = message?.chat?.id;
@@ -1174,6 +1176,22 @@ export const Route = createFileRoute("/webhooks/telegram")({
               fileId: message.document.file_id,
               nomeSugerido: message.document.file_name ?? "documento",
               mimeType: message.document.mime_type ?? "application/octet-stream",
+            });
+          } else if (chatId && message?.voice) {
+            // Mensagem de voz gravada no próprio Telegram (ícone de microfone) —
+            // sempre chega em ogg/opus, sem nome de arquivo.
+            await tratarAnexo(chatId, {
+              fileId: message.voice.file_id,
+              nomeSugerido: "audio.ogg",
+              mimeType: message.voice.mime_type ?? "audio/ogg",
+            });
+          } else if (chatId && message?.audio) {
+            // Arquivo de áudio enviado como mídia (não gravado na hora) —
+            // tipo separado de "document" no Telegram.
+            await tratarAnexo(chatId, {
+              fileId: message.audio.file_id,
+              nomeSugerido: message.audio.file_name ?? "audio.mp3",
+              mimeType: message.audio.mime_type ?? "audio/mpeg",
             });
           } else if (chatId && message?.text) {
             await tratarMensagem(chatId, message.text);
