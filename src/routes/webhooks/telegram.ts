@@ -353,13 +353,16 @@ type SessaoNovaTarefa = {
 
 type SessaoAtualizarTarefa = {
   fluxo: "atualizar";
-  step: "tarefa" | "status" | "texto" | "anexo";
+  step: "tarefa" | "status" | "texto" | "anexo" | "recebendo_anexo";
   condominio: string;
   databaseId: string;
   statusOptions: string[];
   pageId?: string;
   tarefaTitulo?: string;
   novoStatus?: string;
+  pastaDriveId?: string;
+  pastaDriveUrl?: string;
+  anexosRecebidos?: number;
 };
 
 type Sessao = SessaoNovaTarefa | SessaoAtualizarTarefa;
@@ -513,6 +516,156 @@ async function atualizarTarefa(
   await notionFetch(`pages/${pageId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
 }
 
+// "Histórico" é rich_text simples — o PATCH substitui o conteúdo inteiro, não
+// existe "append" nativo, então lê o texto atual antes de reescrever com a
+// linha nova no final.
+async function anexarHistorico(pageId: string, linha: string): Promise<void> {
+  const pagina = (await notionFetch(`pages/${pageId}`)) as {
+    properties: Record<string, { rich_text?: { plain_text: string }[] }>;
+  };
+  const atual = pagina.properties["Histórico"]?.rich_text?.map((t) => t.plain_text).join("") ?? "";
+  const novo = atual ? `${atual}\n${linha}` : linha;
+  await notionFetch(`pages/${pageId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      properties: { Histórico: { rich_text: [{ text: { content: novo } }] } },
+    }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Anexos (Google Drive) — usa o refresh_token da sua própria conta (gerado
+// uma vez em /auth/drive/start), não uma conta de serviço: contas de serviço
+// não têm cota de armazenamento própria, e numa conta Gmail comum (sem Drive
+// Compartilhado, recurso do Workspace pago) os uploads falhariam por "cota
+// excedida". Escopo drive.file: só enxerga/edita arquivos criados por este
+// app, não o Drive inteiro.
+// ---------------------------------------------------------------------------
+
+function driveConfigurado(): boolean {
+  return !!(
+    process.env.GOOGLE_CLIENT_ID &&
+    process.env.GOOGLE_CLIENT_SECRET &&
+    process.env.GOOGLE_DRIVE_REFRESH_TOKEN &&
+    process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID
+  );
+}
+
+async function obterAccessTokenDrive(): Promise<string> {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID!,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET!,
+      refresh_token: process.env.GOOGLE_DRIVE_REFRESH_TOKEN!,
+      grant_type: "refresh_token",
+    }),
+  });
+  const json = (await res.json()) as {
+    access_token?: string;
+    error?: string;
+    error_description?: string;
+  };
+  if (!json.access_token) {
+    throw new Error(
+      `Falha ao renovar token do Drive: ${json.error_description ?? json.error ?? res.statusText}`,
+    );
+  }
+  return json.access_token;
+}
+
+async function buscarOuCriarPastaDrive(
+  nomeTarefa: string,
+  accessToken: string,
+): Promise<{ id: string; url: string }> {
+  const parentId = process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID!;
+  const nomeEscapado = nomeTarefa.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  const q = `name = '${nomeEscapado}' and '${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+  const buscaRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,webViewLink)`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  const busca = (await buscaRes.json()) as { files?: { id: string; webViewLink: string }[] };
+  if (busca.files?.[0]) return { id: busca.files[0].id, url: busca.files[0].webViewLink };
+
+  const criaRes = await fetch("https://www.googleapis.com/drive/v3/files?fields=id,webViewLink", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: nomeTarefa,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentId],
+    }),
+  });
+  const criada = (await criaRes.json()) as { id?: string; webViewLink?: string };
+  if (!criada.id || !criada.webViewLink) {
+    throw new Error(`Falha ao criar pasta no Drive: ${JSON.stringify(criada)}`);
+  }
+  return { id: criada.id, url: criada.webViewLink };
+}
+
+async function uploadArquivoDrive(
+  bytes: ArrayBuffer,
+  nomeArquivo: string,
+  mimeType: string,
+  pastaId: string,
+  accessToken: string,
+): Promise<void> {
+  const metadata = { name: nomeArquivo, parents: [pastaId] };
+  const boundary = `-------drivetelegram${crypto.randomUUID()}`;
+  const encoder = new TextEncoder();
+  const partes: Uint8Array[] = [
+    encoder.encode(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+    ),
+    encoder.encode(`--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),
+    new Uint8Array(bytes),
+    encoder.encode(`\r\n--${boundary}--`),
+  ];
+  const tamanhoTotal = partes.reduce((soma, p) => soma + p.byteLength, 0);
+  const corpo = new Uint8Array(tamanhoTotal);
+  let offset = 0;
+  for (const parte of partes) {
+    corpo.set(parte, offset);
+    offset += parte.byteLength;
+  }
+
+  const res = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": `multipart/related; boundary=${boundary}`,
+    },
+    body: corpo,
+  });
+  if (!res.ok) {
+    const detalhe = await res.text();
+    throw new Error(`Falha ao enviar arquivo pro Drive: ${res.status} ${detalhe}`);
+  }
+}
+
+// Bots do Telegram só conseguem baixar arquivos de até 20MB via getFile — um
+// vídeo maior que isso falha aqui, com o erro propagado pro chat.
+async function baixarArquivoTelegram(fileId: string): Promise<ArrayBuffer> {
+  const infoRes = await fetch(
+    `https://api.telegram.org/bot${telegramToken()}/getFile?file_id=${fileId}`,
+  );
+  const info = (await infoRes.json()) as {
+    ok?: boolean;
+    description?: string;
+    result?: { file_path?: string };
+  };
+  const filePath = info.result?.file_path;
+  if (!filePath) {
+    throw new Error(
+      info.description ?? "Não consegui obter o arquivo do Telegram (maior que 20MB?).",
+    );
+  }
+  const arquivoRes = await fetch(`https://api.telegram.org/file/bot${telegramToken()}/${filePath}`);
+  return arquivoRes.arrayBuffer();
+}
+
 async function buscarTarefasAbertas(databaseId: string): Promise<{ id: string; titulo: string }[]> {
   const json = (await notionFetch(`databases/${databaseId}/query`, {
     method: "POST",
@@ -614,6 +767,65 @@ function resumoTarefaCriada(
 // ---------------------------------------------------------------------------
 // Fluxo Atualizar Tarefa
 // ---------------------------------------------------------------------------
+
+async function finalizarAtualizacao(chatId: number, sessao: SessaoAtualizarTarefa): Promise<void> {
+  if (sessao.pastaDriveUrl) {
+    await anexarHistorico(
+      sessao.pageId!,
+      `📎 ${new Date().toISOString().slice(0, 10)}: ${sessao.anexosRecebidos ?? 0} anexo(s) — ${sessao.pastaDriveUrl}`,
+    );
+  }
+  await limparSessao(chatId);
+  const statusTexto = sessao.novoStatus ? `\n🔄 Novo status: ${sessao.novoStatus}` : "";
+  const anexoTexto = sessao.pastaDriveUrl ? `\n📎 Anexos: ${sessao.pastaDriveUrl}` : "";
+  await responderTelegram(
+    chatId,
+    `✅ Tarefa atualizada: ${sessao.tarefaTitulo}\n🏢 ${sessao.condominio}${statusTexto}${anexoTexto}`,
+    MENU_PRINCIPAL,
+  );
+}
+
+async function tratarAnexo(
+  chatId: number,
+  arquivo: { fileId: string; nomeSugerido: string; mimeType: string },
+): Promise<void> {
+  const linhaSessao = await buscarLinhaSessao(chatId);
+  const sessao = linhaSessao?.sessao;
+  if (!sessao || sessao.fluxo !== "atualizar" || sessao.step !== "recebendo_anexo") return;
+
+  try {
+    const accessToken = await obterAccessTokenDrive();
+    let { pastaDriveId, pastaDriveUrl } = sessao;
+    if (!pastaDriveId) {
+      const pasta = await buscarOuCriarPastaDrive(
+        sessao.tarefaTitulo ?? "Tarefa sem título",
+        accessToken,
+      );
+      pastaDriveId = pasta.id;
+      pastaDriveUrl = pasta.url;
+    }
+
+    const bytes = await baixarArquivoTelegram(arquivo.fileId);
+    await uploadArquivoDrive(
+      bytes,
+      arquivo.nomeSugerido,
+      arquivo.mimeType,
+      pastaDriveId,
+      accessToken,
+    );
+
+    const anexosRecebidos = (sessao.anexosRecebidos ?? 0) + 1;
+    await salvarSessao(chatId, { ...sessao, pastaDriveId, pastaDriveUrl, anexosRecebidos });
+    await responderTelegram(
+      chatId,
+      `✅ Anexo salvo (${anexosRecebidos}). Manda mais ou toque em "Concluir anexos".`,
+      { inline_keyboard: [[{ text: "✅ Concluir anexos", callback_data: "concluiranexos" }]] },
+    );
+  } catch (err) {
+    console.error("tratarAnexo:", err);
+    await responderTelegram(chatId, `❌ Erro ao salvar o anexo: ${(err as Error).message}`);
+  }
+}
 
 async function iniciarEscolhaTarefa(
   chatId: number,
@@ -808,17 +1020,33 @@ async function tratarCallbackQuery(callbackQuery: {
     return;
   }
 
-  if (data.startsWith("anexar:") && sessao.fluxo === "atualizar" && sessao.step === "anexo") {
-    await limparSessao(chatId);
-    if (data === "anexar:sim") {
+  if (data === "anexar:nao" && sessao.fluxo === "atualizar" && sessao.step === "anexo") {
+    await finalizarAtualizacao(chatId, sessao);
+    return;
+  }
+
+  if (data === "anexar:sim" && sessao.fluxo === "atualizar" && sessao.step === "anexo") {
+    if (!driveConfigurado()) {
       await responderTelegram(chatId, "📎 Envio de anexos ainda não está disponível — em breve!");
+      await finalizarAtualizacao(chatId, sessao);
+      return;
     }
-    const statusTexto = sessao.novoStatus ? `\n🔄 Novo status: ${sessao.novoStatus}` : "";
+    const nova: SessaoAtualizarTarefa = { ...sessao, step: "recebendo_anexo" };
+    await salvarSessao(chatId, nova);
     await responderTelegram(
       chatId,
-      `✅ Tarefa atualizada: ${sessao.tarefaTitulo}\n🏢 ${sessao.condominio}${statusTexto}`,
-      MENU_PRINCIPAL,
+      '📎 Manda a foto, vídeo ou documento agora (pode mandar mais de um). Toque em "✅ Concluir" quando terminar.',
+      { inline_keyboard: [[{ text: "✅ Concluir anexos", callback_data: "concluiranexos" }]] },
     );
+    return;
+  }
+
+  if (
+    data === "concluiranexos" &&
+    sessao.fluxo === "atualizar" &&
+    sessao.step === "recebendo_anexo"
+  ) {
+    await finalizarAtualizacao(chatId, sessao);
     return;
   }
 }
@@ -918,11 +1146,37 @@ export const Route = createFileRoute("/webhooks/telegram")({
             return new Response("ok", { status: 200 });
           }
 
-          const message = update.message as { chat?: { id?: number }; text?: string } | undefined;
+          const message = update.message as
+            | {
+                chat?: { id?: number };
+                text?: string;
+                photo?: { file_id: string }[];
+                video?: { file_id: string; file_name?: string; mime_type?: string };
+                document?: { file_id: string; file_name?: string; mime_type?: string };
+              }
+            | undefined;
           const chatId = message?.chat?.id;
-          const texto = message?.text ?? "";
-          if (chatId && texto) {
-            await tratarMensagem(chatId, texto);
+
+          if (chatId && message?.photo && message.photo.length > 0) {
+            await tratarAnexo(chatId, {
+              fileId: message.photo[message.photo.length - 1].file_id,
+              nomeSugerido: "foto.jpg",
+              mimeType: "image/jpeg",
+            });
+          } else if (chatId && message?.video) {
+            await tratarAnexo(chatId, {
+              fileId: message.video.file_id,
+              nomeSugerido: message.video.file_name ?? "video.mp4",
+              mimeType: message.video.mime_type ?? "video/mp4",
+            });
+          } else if (chatId && message?.document) {
+            await tratarAnexo(chatId, {
+              fileId: message.document.file_id,
+              nomeSugerido: message.document.file_name ?? "documento",
+              mimeType: message.document.mime_type ?? "application/octet-stream",
+            });
+          } else if (chatId && message?.text) {
+            await tratarMensagem(chatId, message.text);
           }
         } catch (err) {
           console.error("webhooks/telegram:", err);

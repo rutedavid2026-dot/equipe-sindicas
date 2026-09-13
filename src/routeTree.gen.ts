@@ -23,6 +23,8 @@ import { Route as Char91DotwellKnownChar93OauthProtectedResourceRouteImport } fr
 import { Route as Char91DotmcpChar93ListToolsRouteImport } from './routes/[.mcp]/list-tools'
 import { Route as AuthGoogleStartRouteImport } from './routes/auth/google/start'
 import { Route as AuthGoogleCallbackRouteImport } from './routes/auth/google/callback'
+import { Route as AuthDriveStartRouteImport } from './routes/auth/drive/start'
+import { Route as AuthDriveCallbackRouteImport } from './routes/auth/drive/callback'
 import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[.mcp]/invoke-tool/$tool'
 
 const VivendasPlanoDeAcaoRoute = VivendasPlanoDeAcaoRouteImport.update({
@@ -97,6 +99,16 @@ const AuthGoogleCallbackRoute = AuthGoogleCallbackRouteImport.update({
   path: '/auth/google/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthDriveStartRoute = AuthDriveStartRouteImport.update({
+  id: '/auth/drive/start',
+  path: '/auth/drive/start',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthDriveCallbackRoute = AuthDriveCallbackRouteImport.update({
+  id: '/auth/drive/callback',
+  path: '/auth/drive/callback',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const Char91DotmcpChar93InvokeToolToolRoute =
   Char91DotmcpChar93InvokeToolToolRouteImport.update({
     id: '/.mcp/invoke-tool/$tool',
@@ -118,6 +130,8 @@ export interface FileRoutesByFullPath {
   '/webhooks/notion': typeof WebhooksNotionRoute
   '/webhooks/telegram': typeof WebhooksTelegramRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
+  '/auth/drive/callback': typeof AuthDriveCallbackRoute
+  '/auth/drive/start': typeof AuthDriveStartRoute
   '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/auth/google/start': typeof AuthGoogleStartRoute
 }
@@ -135,6 +149,8 @@ export interface FileRoutesByTo {
   '/webhooks/notion': typeof WebhooksNotionRoute
   '/webhooks/telegram': typeof WebhooksTelegramRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
+  '/auth/drive/callback': typeof AuthDriveCallbackRoute
+  '/auth/drive/start': typeof AuthDriveStartRoute
   '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/auth/google/start': typeof AuthGoogleStartRoute
 }
@@ -153,6 +169,8 @@ export interface FileRoutesById {
   '/webhooks/notion': typeof WebhooksNotionRoute
   '/webhooks/telegram': typeof WebhooksTelegramRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
+  '/auth/drive/callback': typeof AuthDriveCallbackRoute
+  '/auth/drive/start': typeof AuthDriveStartRoute
   '/auth/google/callback': typeof AuthGoogleCallbackRoute
   '/auth/google/start': typeof AuthGoogleStartRoute
 }
@@ -172,6 +190,8 @@ export interface FileRouteTypes {
     | '/webhooks/notion'
     | '/webhooks/telegram'
     | '/.mcp/invoke-tool/$tool'
+    | '/auth/drive/callback'
+    | '/auth/drive/start'
     | '/auth/google/callback'
     | '/auth/google/start'
   fileRoutesByTo: FileRoutesByTo
@@ -189,6 +209,8 @@ export interface FileRouteTypes {
     | '/webhooks/notion'
     | '/webhooks/telegram'
     | '/.mcp/invoke-tool/$tool'
+    | '/auth/drive/callback'
+    | '/auth/drive/start'
     | '/auth/google/callback'
     | '/auth/google/start'
   id:
@@ -206,6 +228,8 @@ export interface FileRouteTypes {
     | '/webhooks/notion'
     | '/webhooks/telegram'
     | '/.mcp/invoke-tool/$tool'
+    | '/auth/drive/callback'
+    | '/auth/drive/start'
     | '/auth/google/callback'
     | '/auth/google/start'
   fileRoutesById: FileRoutesById
@@ -224,6 +248,8 @@ export interface RootRouteChildren {
   WebhooksNotionRoute: typeof WebhooksNotionRoute
   WebhooksTelegramRoute: typeof WebhooksTelegramRoute
   Char91DotmcpChar93InvokeToolToolRoute: typeof Char91DotmcpChar93InvokeToolToolRoute
+  AuthDriveCallbackRoute: typeof AuthDriveCallbackRoute
+  AuthDriveStartRoute: typeof AuthDriveStartRoute
   AuthGoogleCallbackRoute: typeof AuthGoogleCallbackRoute
   AuthGoogleStartRoute: typeof AuthGoogleStartRoute
 }
@@ -328,6 +354,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthGoogleCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/auth/drive/start': {
+      id: '/auth/drive/start'
+      path: '/auth/drive/start'
+      fullPath: '/auth/drive/start'
+      preLoaderRoute: typeof AuthDriveStartRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/auth/drive/callback': {
+      id: '/auth/drive/callback'
+      path: '/auth/drive/callback'
+      fullPath: '/auth/drive/callback'
+      preLoaderRoute: typeof AuthDriveCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/.mcp/invoke-tool/$tool': {
       id: '/.mcp/invoke-tool/$tool'
       path: '/.mcp/invoke-tool/$tool'
@@ -353,6 +393,8 @@ const rootRouteChildren: RootRouteChildren = {
   WebhooksNotionRoute: WebhooksNotionRoute,
   WebhooksTelegramRoute: WebhooksTelegramRoute,
   Char91DotmcpChar93InvokeToolToolRoute: Char91DotmcpChar93InvokeToolToolRoute,
+  AuthDriveCallbackRoute: AuthDriveCallbackRoute,
+  AuthDriveStartRoute: AuthDriveStartRoute,
   AuthGoogleCallbackRoute: AuthGoogleCallbackRoute,
   AuthGoogleStartRoute: AuthGoogleStartRoute,
 }
