@@ -1,15 +1,26 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { isFechada, normalizeForMatch } from "@/lib/report-utils";
 
-// Recebe mensagens do bot do Telegram (@equipesindicas_bot) e permite criar
-// tarefas direto pelo chat, sem abrir o Notion.
+// Recebe mensagens do bot do Telegram (@equipesindicas_bot) e permite criar e
+// atualizar tarefas direto pelo chat, sem abrir o Notion.
 //
-// Camada 2: fluxo com botões — /novatarefa (sem argumentos) pergunta o
-// condomínio (só os que a síndica gerencia, via database "Síndicas"), depois
-// o nome da tarefa e a previsão em dias, um passo por mensagem. O estado
+// Menu principal: "🆕 Nova Tarefa" e "🔄 Atualizar Tarefa" (mostrado em
+// /start, /menu, ou tocando em "🔙 Voltar ao início" — botão anexado por
+// padrão em toda mensagem enviada em algum fluxo em andamento). O estado
 // entre uma mensagem e outra fica na database "Sessões (bot Telegram)" (1
 // linha por chat_id) — necessário porque cada mensagem chega como uma
 // requisição HTTP separada e isolada (sem memória em processo entre elas,
 // rodando em edge/serverless).
+//
+// Nova Tarefa: condomínio → nome da tarefa → prazo (botões pré-definidos) →
+// responsável → prioridade → setor — todas as opções de cada passo (exceto
+// prazo) são lidas do schema real da database do condomínio escolhido, nunca
+// hardcoded, porque o vocabulário de Status/Prioridade/Setor diverge entre
+// condomínios (confirmado database por database antes de implementar isso).
+//
+// Atualizar Tarefa: condomínio → tarefa em aberto → novo status (opcional) →
+// texto da última atualização → (anexos: ainda não implementado, depende de
+// integração futura com Google Drive).
 //
 // Camada 1 (comando único, ainda funciona): /novatarefa Condomínio | Tarefa
 // | Dias — atalho pra quem já sabe o formato, sem passar pelos botões.
@@ -51,8 +62,8 @@ const CONDOMINIOS: Record<string, string> = {
   malibu: "3bbe69ba114f8070b9a9e0c43e39e6f6",
   "encantos do mar": "3c3e69ba114f81739c7dfe12c44934cc",
   "mar aberto": "3c3e69ba114f812c84afc22527799c51",
-  "contemporâneo": "8a345139cef14f7d8c2777c3e9058675",
-  "rivière": "3c3e69ba114f81098890f38772e06395",
+  contemporâneo: "8a345139cef14f7d8c2777c3e9058675",
+  rivière: "3c3e69ba114f81098890f38772e06395",
   "saint exupéry": "3c3e69ba114f810d93b0e9bc37d51b06",
   "la plage": "3c3e69ba114f81f98d72f0337e5cd6cf",
   absoluto: "3c3e69ba114f818a9154c637ec23dd42",
@@ -98,22 +109,39 @@ async function notionFetch(path: string, options: RequestInit = {}) {
   return json;
 }
 
-// Botão "Nova Tarefa" como inline_keyboard (grudado na própria mensagem) em
-// vez de ReplyKeyboardMarkup (teclado por baixo da caixa de texto) — o
-// teclado por baixo alterna com o teclado do sistema (some sempre que o bot
-// espera texto livre, tipo "qual o nome da tarefa?", exigindo tocar num ícone
-// pra voltar); o botão inline fica sempre visível na última mensagem do bot,
-// sem depender do estado do teclado do celular.
-const BOTAO_NOVA_TAREFA = { text: "🆕 Nova Tarefa", callback_data: "novatarefa" };
-const MENU_PRINCIPAL = { inline_keyboard: [[BOTAO_NOVA_TAREFA]] };
+function truncar(texto: string, tamanho: number): string {
+  return texto.length > tamanho ? `${texto.slice(0, tamanho - 1)}…` : texto;
+}
+
+// Botões inline (grudados na própria mensagem) em vez de ReplyKeyboardMarkup
+// (teclado por baixo da caixa de texto) — o teclado por baixo alterna com o
+// teclado do sistema (some sempre que o bot espera texto livre, exigindo
+// tocar num ícone pra voltar); o botão inline fica sempre visível na última
+// mensagem do bot, sem depender do estado do teclado do celular.
+const BOTAO_VOLTAR = { text: "🔙 Voltar ao início", callback_data: "inicio" };
+const MENU_VOLTAR = { inline_keyboard: [[BOTAO_VOLTAR]] };
+const MENU_PRINCIPAL = {
+  inline_keyboard: [
+    [{ text: "🆕 Nova Tarefa", callback_data: "novatarefa" }],
+    [{ text: "🔄 Atualizar Tarefa", callback_data: "atualizartarefa" }],
+  ],
+};
 
 type ReplyMarkup = { inline_keyboard: { text: string; callback_data: string }[][] };
 
-async function responderTelegram(chatId: number, texto: string, replyMarkup?: ReplyMarkup): Promise<void> {
+async function responderTelegram(
+  chatId: number,
+  texto: string,
+  replyMarkup?: ReplyMarkup,
+): Promise<void> {
   await fetch(`https://api.telegram.org/bot${telegramToken()}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: texto, reply_markup: replyMarkup ?? MENU_PRINCIPAL }),
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: texto,
+      reply_markup: replyMarkup ?? MENU_VOLTAR,
+    }),
   });
 }
 
@@ -126,6 +154,10 @@ async function responderCallback(callbackQueryId: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ callback_query_id: callbackQueryId }),
   });
+}
+
+async function mostrarMenuInicial(chatId: number): Promise<void> {
+  await responderTelegram(chatId, "O que você quer fazer?", MENU_PRINCIPAL);
 }
 
 // Retorna os condomínios que essa síndica gerencia (vazio = não autorizada
@@ -153,16 +185,145 @@ async function condominiosDaSindica(chatId: number): Promise<string[]> {
   return [...nomes];
 }
 
-type Sessao = { step: "aguardando_tarefa" | "aguardando_dias"; condominio: string; tarefa?: string };
+// ---------------------------------------------------------------------------
+// Schema da database do condomínio: Status, Prioridade, Setor e Responsável
+// variam de condomínio pra condomínio (confirmado database por database) —
+// por isso as opções de cada passo do fluxo são sempre lidas daqui, nunca
+// hardcoded. Buscado uma vez só (ao escolher o condomínio) e guardado na
+// sessão, pra não repetir a chamada à API a cada pergunta.
+// ---------------------------------------------------------------------------
 
-// 1 linha por chat_id na database "Sessões (bot Telegram)" — busca a
-// existente (se houver) pra decidir entre criar ou atualizar, mesmo padrão
-// de fetchTodasPaginasExistentes em sync-followups-notion.mjs.
-async function buscarLinhaSessao(chatId: number): Promise<{ pageId: string; sessao: Sessao | null } | null> {
+type OpcoesEscolha = { tipo: "select" | "multi_select"; opcoes: string[] };
+type OpcoesResponsavel =
+  | { tipo: "select" | "multi_select"; opcoes: string[] }
+  | { tipo: "people"; opcoes: { id: string; nome: string }[] };
+
+type OpcoesCondominio = {
+  statusOptions: string[];
+  statusPadrao?: string;
+  prioridade: OpcoesEscolha;
+  setor: OpcoesEscolha;
+  responsavel: OpcoesResponsavel;
+};
+
+// Pessoas do tipo "people" não têm opções fixas no schema (é uma referência a
+// usuários do Notion, não uma lista pré-definida) — em vez de listar o
+// workspace inteiro, levanta quem já foi responsável nas tarefas mais
+// recentes dessa base específica, uma aproximação razoável de "responsáveis
+// desse condomínio".
+async function opcoesResponsavelPeople(
+  databaseId: string,
+): Promise<{ id: string; nome: string }[]> {
+  const json = (await notionFetch(`databases/${databaseId}/query`, {
+    method: "POST",
+    body: JSON.stringify({
+      page_size: 50,
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+    }),
+  })) as {
+    results: { properties: Record<string, { people?: { id: string; name?: string }[] }> }[];
+  };
+
+  const vistos = new Map<string, string>();
+  for (const page of json.results) {
+    for (const pessoa of page.properties["Responsável"]?.people ?? []) {
+      if (pessoa.id && pessoa.name) vistos.set(pessoa.id, pessoa.name);
+    }
+  }
+  return [...vistos.entries()].map(([id, nome]) => ({ id, nome }));
+}
+
+async function buscarSchemaCondominio(databaseId: string): Promise<OpcoesCondominio> {
+  type PropDef = {
+    type: string;
+    status?: { options: { name: string }[] };
+    select?: { options: { name: string }[] };
+    multi_select?: { options: { name: string }[] };
+  };
+  const db = (await notionFetch(`databases/${databaseId}`)) as {
+    properties: Record<string, PropDef>;
+  };
+  const props = db.properties;
+
+  function opcoesEscolha(nome: string): OpcoesEscolha {
+    const prop = props[nome];
+    if (prop?.type === "multi_select") {
+      return { tipo: "multi_select", opcoes: prop.multi_select?.options.map((o) => o.name) ?? [] };
+    }
+    if (prop?.type === "select") {
+      return { tipo: "select", opcoes: prop.select?.options.map((o) => o.name) ?? [] };
+    }
+    return { tipo: "select", opcoes: [] };
+  }
+
+  const statusOptions = props["Status"]?.status?.options.map((o) => o.name) ?? [];
+  const statusPadrao = statusOptions.find((s) => normalizeForMatch(s).startsWith("nao iniciad"));
+
+  const responsavelProp = props["Responsável"];
+  let responsavel: OpcoesResponsavel;
+  if (responsavelProp?.type === "people") {
+    responsavel = { tipo: "people", opcoes: await opcoesResponsavelPeople(databaseId) };
+  } else {
+    responsavel = opcoesEscolha("Responsável");
+  }
+
+  return {
+    statusOptions,
+    statusPadrao,
+    prioridade: opcoesEscolha("Prioridade"),
+    setor: opcoesEscolha("Setor"),
+    responsavel,
+  };
+}
+
+function valorEscolha(tipo: "select" | "multi_select", nome: string): Record<string, unknown> {
+  return tipo === "multi_select" ? { multi_select: [{ name: nome }] } : { select: { name: nome } };
+}
+
+// ---------------------------------------------------------------------------
+// Sessão — 1 linha por chat_id na database "Sessões (bot Telegram)". Busca a
+// existente (se houver) pra decidir entre criar ou atualizar, mesmo padrão de
+// fetchTodasPaginasExistentes em sync-followups-notion.mjs.
+// ---------------------------------------------------------------------------
+
+type ResponsavelValor =
+  | { tipo: "people"; id: string; nome: string }
+  | { tipo: "select" | "multi_select"; nome: string };
+
+type SessaoNovaTarefa = {
+  fluxo: "nova";
+  step: "tarefa" | "prazo" | "responsavel" | "prioridade" | "setor";
+  condominio: string;
+  databaseId: string;
+  opcoes: OpcoesCondominio;
+  tarefa?: string;
+  dias?: number;
+  responsavelValor?: ResponsavelValor;
+  prioridade?: string;
+};
+
+type SessaoAtualizarTarefa = {
+  fluxo: "atualizar";
+  step: "tarefa" | "status" | "texto" | "anexo";
+  condominio: string;
+  databaseId: string;
+  statusOptions: string[];
+  pageId?: string;
+  tarefaTitulo?: string;
+  novoStatus?: string;
+};
+
+type Sessao = SessaoNovaTarefa | SessaoAtualizarTarefa;
+
+async function buscarLinhaSessao(
+  chatId: number,
+): Promise<{ pageId: string; sessao: Sessao | null } | null> {
   const json = (await notionFetch(`databases/${SESSOES_DB_ID}/query`, {
     method: "POST",
     body: JSON.stringify({ filter: { property: "ChatId", title: { equals: String(chatId) } } }),
-  })) as { results: { id: string; properties: Record<string, { rich_text?: { plain_text: string }[] }> }[] };
+  })) as {
+    results: { id: string; properties: Record<string, { rich_text?: { plain_text: string }[] }> }[];
+  };
 
   if (json.results.length === 0) return null;
   const page = json.results[0];
@@ -174,7 +335,10 @@ async function salvarSessao(chatId: number, sessao: Sessao): Promise<void> {
   const existente = await buscarLinhaSessao(chatId);
   const properties = { Estado: { rich_text: [{ text: { content: JSON.stringify(sessao) } }] } };
   if (existente) {
-    await notionFetch(`pages/${existente.pageId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
+    await notionFetch(`pages/${existente.pageId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ properties }),
+    });
   } else {
     await notionFetch("pages", {
       method: "POST",
@@ -196,6 +360,10 @@ async function limparSessao(chatId: number): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Camada 1 — comando de uma linha só, sem passar pelos botões.
+// ---------------------------------------------------------------------------
+
 type ComandoNovaTarefa = { condominio: string; tarefa: string; dias: number };
 
 function parsearComando(texto: string): ComandoNovaTarefa | { erro: string } {
@@ -211,12 +379,40 @@ function parsearComando(texto: string): ComandoNovaTarefa | { erro: string } {
   const [condominio, tarefa, diasTexto] = partes;
   const dias = Number(diasTexto);
   if (!Number.isFinite(dias) || dias <= 0) {
-    return { erro: `Previsão em dias inválida: "${diasTexto}" (precisa ser um número maior que zero).` };
+    return {
+      erro: `Previsão em dias inválida: "${diasTexto}" (precisa ser um número maior que zero).`,
+    };
   }
   return { condominio, tarefa, dias };
 }
 
-async function criarTarefa({ condominio, tarefa, dias }: ComandoNovaTarefa): Promise<string> {
+// ---------------------------------------------------------------------------
+// Criação e atualização de tarefa
+// ---------------------------------------------------------------------------
+
+type CriarTarefaInput = {
+  condominio: string;
+  tarefa: string;
+  dias: number;
+  statusPadrao?: string;
+  responsavelValor?: ResponsavelValor;
+  prioridade?: string;
+  prioridadeTipo?: "select" | "multi_select";
+  setor?: string;
+  setorTipo?: "select" | "multi_select";
+};
+
+async function criarTarefa({
+  condominio,
+  tarefa,
+  dias,
+  statusPadrao,
+  responsavelValor,
+  prioridade,
+  prioridadeTipo,
+  setor,
+  setorTipo,
+}: CriarTarefaInput): Promise<string> {
   const databaseId = CONDOMINIOS[condominio.toLowerCase()];
   if (!databaseId) {
     const nomes = Object.keys(CONDOMINIOS).join(", ");
@@ -224,23 +420,179 @@ async function criarTarefa({ condominio, tarefa, dias }: ComandoNovaTarefa): Pro
   }
 
   const hoje = new Date().toISOString().slice(0, 10);
+  const properties: Record<string, unknown> = {
+    Tarefas: { title: [{ text: { content: tarefa } }] },
+    "Data de Início": { date: { start: hoje } },
+    "Previsão (em dias)": { number: dias },
+    Condomínio: { select: { name: condominio } },
+  };
+  if (statusPadrao) properties["Status"] = { status: { name: statusPadrao } };
+  if (prioridade) properties["Prioridade"] = valorEscolha(prioridadeTipo ?? "select", prioridade);
+  if (setor) properties["Setor"] = valorEscolha(setorTipo ?? "select", setor);
+  if (responsavelValor) {
+    properties["Responsável"] =
+      responsavelValor.tipo === "people"
+        ? { people: [{ id: responsavelValor.id }] }
+        : valorEscolha(responsavelValor.tipo, responsavelValor.nome);
+  }
+
   const pagina = (await notionFetch("pages", {
     method: "POST",
-    body: JSON.stringify({
-      parent: { database_id: databaseId },
-      properties: {
-        Tarefas: { title: [{ text: { content: tarefa } }] },
-        "Data de Início": { date: { start: hoje } },
-        "Previsão (em dias)": { number: dias },
-        Condomínio: { select: { name: condominio } },
-      },
-    }),
+    body: JSON.stringify({ parent: { database_id: databaseId }, properties }),
   })) as { url: string };
 
   return pagina.url;
 }
 
-async function iniciarEscolhaCondominio(chatId: number): Promise<void> {
+async function atualizarTarefa(
+  pageId: string,
+  novoStatus: string | undefined,
+  texto: string,
+): Promise<void> {
+  const properties: Record<string, unknown> = {
+    "Última Atualização": { rich_text: [{ text: { content: texto } }] },
+  };
+  if (novoStatus) properties["Status"] = { status: { name: novoStatus } };
+  await notionFetch(`pages/${pageId}`, { method: "PATCH", body: JSON.stringify({ properties }) });
+}
+
+async function buscarTarefasAbertas(databaseId: string): Promise<{ id: string; titulo: string }[]> {
+  const json = (await notionFetch(`databases/${databaseId}/query`, {
+    method: "POST",
+    body: JSON.stringify({
+      page_size: 30,
+      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+    }),
+  })) as {
+    results: {
+      id: string;
+      properties: Record<string, { status?: { name: string }; title?: { plain_text: string }[] }>;
+    }[];
+  };
+
+  return json.results
+    .filter((p) => {
+      const status = p.properties["Status"]?.status?.name;
+      return status && !isFechada(status);
+    })
+    .slice(0, 15)
+    .map((p) => ({
+      id: p.id,
+      titulo: p.properties["Tarefas"]?.title?.[0]?.plain_text ?? "(sem título)",
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Fluxo Nova Tarefa
+// ---------------------------------------------------------------------------
+
+async function perguntarPrazo(chatId: number): Promise<void> {
+  await responderTelegram(chatId, "📅 Qual o prazo?", {
+    inline_keyboard: [
+      [
+        { text: "Hoje", callback_data: "prazo:0" },
+        { text: "3 dias", callback_data: "prazo:3" },
+      ],
+      [
+        { text: "7 dias", callback_data: "prazo:7" },
+        { text: "15 dias", callback_data: "prazo:15" },
+      ],
+      [
+        { text: "30 dias", callback_data: "prazo:30" },
+        { text: "60 dias", callback_data: "prazo:60" },
+      ],
+    ],
+  });
+}
+
+async function perguntarResponsavel(chatId: number, sessao: SessaoNovaTarefa): Promise<void> {
+  const r = sessao.opcoes.responsavel;
+  const botoes: { text: string; callback_data: string }[][] = [];
+  if (r.tipo === "people") {
+    for (const p of r.opcoes) botoes.push([{ text: p.nome, callback_data: `resp:id:${p.id}` }]);
+  } else {
+    for (const nome of r.opcoes) botoes.push([{ text: nome, callback_data: `resp:nome:${nome}` }]);
+  }
+  botoes.push([{ text: "➡️ Pular", callback_data: "resp:pular" }]);
+  await responderTelegram(chatId, "👤 Responsável?", { inline_keyboard: botoes });
+}
+
+async function perguntarPrioridade(chatId: number, sessao: SessaoNovaTarefa): Promise<void> {
+  const opcoes = sessao.opcoes.prioridade.opcoes;
+  if (opcoes.length === 0) {
+    await salvarSessao(chatId, { ...sessao, step: "setor" });
+    await perguntarSetor(chatId, { ...sessao, step: "setor" });
+    return;
+  }
+  await responderTelegram(chatId, "🎯 Prioridade?", {
+    inline_keyboard: opcoes.map((nome) => [{ text: nome, callback_data: `prioridade:${nome}` }]),
+  });
+}
+
+async function perguntarSetor(chatId: number, sessao: SessaoNovaTarefa): Promise<void> {
+  const opcoes = sessao.opcoes.setor.opcoes;
+  const botoes = opcoes.map((nome) => [{ text: nome, callback_data: `setor:${nome}` }]);
+  botoes.push([{ text: "➡️ Pular", callback_data: "setor:pular" }]);
+  await responderTelegram(chatId, "🗂️ Setor?", { inline_keyboard: botoes });
+}
+
+function resumoTarefaCriada(
+  sessao: SessaoNovaTarefa,
+  prioridade: string | undefined,
+  setor: string | undefined,
+  url: string,
+): string {
+  const linhas = [
+    `✅ Tarefa criada: ${sessao.tarefa}`,
+    `🏢 ${sessao.condominio}`,
+    `📅 Previsão: ${sessao.dias} dia(s)`,
+  ];
+  if (sessao.responsavelValor) linhas.push(`👤 ${sessao.responsavelValor.nome}`);
+  if (prioridade) linhas.push(`🎯 ${prioridade}`);
+  if (setor) linhas.push(`🗂️ ${setor}`);
+  linhas.push("", `🔗 ${url}`);
+  return linhas.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Fluxo Atualizar Tarefa
+// ---------------------------------------------------------------------------
+
+async function iniciarEscolhaTarefa(
+  chatId: number,
+  condominio: string,
+  databaseId: string,
+): Promise<void> {
+  const [tarefas, schema] = await Promise.all([
+    buscarTarefasAbertas(databaseId),
+    buscarSchemaCondominio(databaseId),
+  ]);
+  if (tarefas.length === 0) {
+    await responderTelegram(chatId, `Nenhuma tarefa em aberto em ${condominio}.`, MENU_PRINCIPAL);
+    return;
+  }
+  await salvarSessao(chatId, {
+    fluxo: "atualizar",
+    step: "tarefa",
+    condominio,
+    databaseId,
+    statusOptions: schema.statusOptions,
+  });
+  await responderTelegram(chatId, `🏢 ${condominio}\n\n📋 Qual tarefa?`, {
+    inline_keyboard: tarefas.map((t) => [
+      { text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` },
+    ]),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Condomínio (compartilhado pelos dois fluxos)
+// ---------------------------------------------------------------------------
+
+async function iniciarEscolhaCondominio(
+  chatId: number,
+  fluxo: "nova" | "atualizar",
+): Promise<void> {
   const condominios = await condominiosDaSindica(chatId);
   if (condominios.length === 0) {
     await responderTelegram(
@@ -250,9 +602,15 @@ async function iniciarEscolhaCondominio(chatId: number): Promise<void> {
     return;
   }
   await responderTelegram(chatId, "🏢 Qual condomínio?", {
-    inline_keyboard: condominios.map((nome) => [{ text: nome, callback_data: `condo:${nome}` }]),
+    inline_keyboard: condominios.map((nome) => [
+      { text: nome, callback_data: `condo:${fluxo}:${nome}` },
+    ]),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Callback queries (cliques em botões)
+// ---------------------------------------------------------------------------
 
 async function tratarCallbackQuery(callbackQuery: {
   id: string;
@@ -261,18 +619,149 @@ async function tratarCallbackQuery(callbackQuery: {
 }): Promise<void> {
   await responderCallback(callbackQuery.id);
   const chatId = callbackQuery.message?.chat?.id;
-  if (!chatId || !callbackQuery.data) return;
+  const data = callbackQuery.data;
+  if (!chatId || !data) return;
 
-  if (callbackQuery.data === "novatarefa") {
-    await iniciarEscolhaCondominio(chatId);
+  if (data === "inicio") {
+    await limparSessao(chatId);
+    await mostrarMenuInicial(chatId);
     return;
   }
 
-  if (!callbackQuery.data.startsWith("condo:")) return;
-  const condominio = callbackQuery.data.slice("condo:".length);
-  await salvarSessao(chatId, { step: "aguardando_tarefa", condominio });
-  await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
+  if (data === "novatarefa") {
+    await iniciarEscolhaCondominio(chatId, "nova");
+    return;
+  }
+
+  if (data === "atualizartarefa") {
+    await iniciarEscolhaCondominio(chatId, "atualizar");
+    return;
+  }
+
+  if (data.startsWith("condo:")) {
+    const resto = data.slice("condo:".length);
+    const separador = resto.indexOf(":");
+    const fluxo = resto.slice(0, separador);
+    const condominio = resto.slice(separador + 1);
+    const databaseId = CONDOMINIOS[condominio.toLowerCase()];
+    if (!databaseId) return;
+
+    if (fluxo === "nova") {
+      const opcoes = await buscarSchemaCondominio(databaseId);
+      await salvarSessao(chatId, { fluxo: "nova", step: "tarefa", condominio, databaseId, opcoes });
+      await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
+    } else {
+      await iniciarEscolhaTarefa(chatId, condominio, databaseId);
+    }
+    return;
+  }
+
+  const linhaSessao = await buscarLinhaSessao(chatId);
+  const sessao = linhaSessao?.sessao;
+  if (!sessao) return;
+
+  if (data.startsWith("prazo:") && sessao.fluxo === "nova" && sessao.step === "prazo") {
+    const dias = Number(data.slice("prazo:".length));
+    const nova: SessaoNovaTarefa = { ...sessao, step: "responsavel", dias };
+    await salvarSessao(chatId, nova);
+    await perguntarResponsavel(chatId, nova);
+    return;
+  }
+
+  if (data.startsWith("resp:") && sessao.fluxo === "nova" && sessao.step === "responsavel") {
+    const resto = data.slice("resp:".length);
+    let responsavelValor: ResponsavelValor | undefined;
+    if (resto.startsWith("id:")) {
+      const id = resto.slice("id:".length);
+      const r = sessao.opcoes.responsavel;
+      const encontrado = r.tipo === "people" ? r.opcoes.find((p) => p.id === id) : undefined;
+      if (encontrado) responsavelValor = { tipo: "people", id, nome: encontrado.nome };
+    } else if (resto.startsWith("nome:")) {
+      const nome = resto.slice("nome:".length);
+      const tipo = sessao.opcoes.responsavel.tipo;
+      responsavelValor = { tipo: tipo === "people" ? "select" : tipo, nome };
+    }
+    const nova: SessaoNovaTarefa = { ...sessao, step: "prioridade", responsavelValor };
+    await salvarSessao(chatId, nova);
+    await perguntarPrioridade(chatId, nova);
+    return;
+  }
+
+  if (data.startsWith("prioridade:") && sessao.fluxo === "nova" && sessao.step === "prioridade") {
+    const prioridade = data.slice("prioridade:".length);
+    const nova: SessaoNovaTarefa = { ...sessao, step: "setor", prioridade };
+    await salvarSessao(chatId, nova);
+    await perguntarSetor(chatId, nova);
+    return;
+  }
+
+  if (data.startsWith("setor:") && sessao.fluxo === "nova" && sessao.step === "setor") {
+    const valorSetor = data.slice("setor:".length);
+    const setor = valorSetor === "pular" ? undefined : valorSetor;
+
+    await limparSessao(chatId);
+    const url = await criarTarefa({
+      condominio: sessao.condominio,
+      tarefa: sessao.tarefa!,
+      dias: sessao.dias!,
+      statusPadrao: sessao.opcoes.statusPadrao,
+      responsavelValor: sessao.responsavelValor,
+      prioridade: sessao.prioridade,
+      prioridadeTipo: sessao.opcoes.prioridade.tipo,
+      setor,
+      setorTipo: sessao.opcoes.setor.tipo,
+    });
+    await responderTelegram(
+      chatId,
+      resumoTarefaCriada(sessao, sessao.prioridade, setor, url),
+      MENU_PRINCIPAL,
+    );
+    return;
+  }
+
+  if (data.startsWith("tarefa:") && sessao.fluxo === "atualizar" && sessao.step === "tarefa") {
+    const pageId = data.slice("tarefa:".length);
+    const pagina = (await notionFetch(`pages/${pageId}`)) as {
+      properties: Record<string, { title?: { plain_text: string }[] }>;
+    };
+    const titulo = pagina.properties["Tarefas"]?.title?.[0]?.plain_text ?? "(sem título)";
+    const nova: SessaoAtualizarTarefa = { ...sessao, step: "status", pageId, tarefaTitulo: titulo };
+    await salvarSessao(chatId, nova);
+    await responderTelegram(chatId, `📋 ${titulo}\n\nTarefa mudou de status?`, {
+      inline_keyboard: [
+        ...sessao.statusOptions.map((s) => [{ text: s, callback_data: `status:${s}` }]),
+        [{ text: "➡️ Manter o status atual", callback_data: "status:" }],
+      ],
+    });
+    return;
+  }
+
+  if (data.startsWith("status:") && sessao.fluxo === "atualizar" && sessao.step === "status") {
+    const novoStatus = data.slice("status:".length) || undefined;
+    const nova: SessaoAtualizarTarefa = { ...sessao, step: "texto", novoStatus };
+    await salvarSessao(chatId, nova);
+    await responderTelegram(chatId, "✏️ Descreva a última atualização:");
+    return;
+  }
+
+  if (data.startsWith("anexar:") && sessao.fluxo === "atualizar" && sessao.step === "anexo") {
+    await limparSessao(chatId);
+    if (data === "anexar:sim") {
+      await responderTelegram(chatId, "📎 Envio de anexos ainda não está disponível — em breve!");
+    }
+    const statusTexto = sessao.novoStatus ? `\n🔄 Novo status: ${sessao.novoStatus}` : "";
+    await responderTelegram(
+      chatId,
+      `✅ Tarefa atualizada: ${sessao.tarefaTitulo}\n🏢 ${sessao.condominio}${statusTexto}`,
+      MENU_PRINCIPAL,
+    );
+    return;
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Mensagens de texto
+// ---------------------------------------------------------------------------
 
 async function tratarMensagem(chatId: number, texto: string): Promise<void> {
   const autorizada = (await condominiosDaSindica(chatId)).length > 0;
@@ -295,12 +784,22 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
     await responderTelegram(
       chatId,
       `✅ Tarefa criada: ${comando.tarefa}\n🏢 ${comando.condominio}\n📅 Previsão: ${comando.dias} dia(s)\n\n🔗 ${url}`,
+      MENU_PRINCIPAL,
     );
     return;
   }
 
-  if (/^\/novatarefa(@\w+)?\s*$/i.test(texto) || texto === "🆕 Nova Tarefa") {
-    await iniciarEscolhaCondominio(chatId);
+  if (/^\/(novatarefa|start|menu)(@\w+)?\s*$/i.test(texto) || texto === "🆕 Nova Tarefa") {
+    if (/^\/novatarefa/i.test(texto) || texto === "🆕 Nova Tarefa") {
+      await iniciarEscolhaCondominio(chatId, "nova");
+    } else {
+      await mostrarMenuInicial(chatId);
+    }
+    return;
+  }
+
+  if (/^\/atualizartarefa(@\w+)?\s*$/i.test(texto)) {
+    await iniciarEscolhaCondominio(chatId, "atualizar");
     return;
   }
 
@@ -312,24 +811,26 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
     return;
   }
 
-  if (sessao.step === "aguardando_tarefa") {
-    await salvarSessao(chatId, { step: "aguardando_dias", condominio: sessao.condominio, tarefa: texto });
-    await responderTelegram(chatId, "📅 Previsão em quantos dias?");
+  if (sessao.fluxo === "nova" && sessao.step === "tarefa") {
+    const nova: SessaoNovaTarefa = { ...sessao, step: "prazo", tarefa: texto };
+    await salvarSessao(chatId, nova);
+    await perguntarPrazo(chatId);
     return;
   }
 
-  if (sessao.step === "aguardando_dias") {
-    const dias = Number(texto.trim());
-    if (!Number.isFinite(dias) || dias <= 0) {
-      await responderTelegram(chatId, `Previsão inválida: "${texto}". Manda só o número de dias (ex: 3).`);
-      return;
-    }
-    const url = await criarTarefa({ condominio: sessao.condominio, tarefa: sessao.tarefa!, dias });
-    await limparSessao(chatId);
-    await responderTelegram(
-      chatId,
-      `✅ Tarefa criada: ${sessao.tarefa}\n🏢 ${sessao.condominio}\n📅 Previsão: ${dias} dia(s)\n\n🔗 ${url}`,
-    );
+  if (sessao.fluxo === "atualizar" && sessao.step === "texto") {
+    await atualizarTarefa(sessao.pageId!, sessao.novoStatus, texto);
+    const nova: SessaoAtualizarTarefa = { ...sessao, step: "anexo" };
+    await salvarSessao(chatId, nova);
+    await responderTelegram(chatId, "📎 Quer anexar foto, vídeo ou documento?", {
+      inline_keyboard: [
+        [
+          { text: "Sim", callback_data: "anexar:sim" },
+          { text: "Não", callback_data: "anexar:nao" },
+        ],
+      ],
+    });
+    return;
   }
 }
 
