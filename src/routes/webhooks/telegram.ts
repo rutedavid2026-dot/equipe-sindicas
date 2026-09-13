@@ -249,11 +249,6 @@ async function iniciarEscolhaCondominio(chatId: number): Promise<void> {
     );
     return;
   }
-  if (condominios.length === 1) {
-    await salvarSessao(chatId, { step: "aguardando_tarefa", condominio: condominios[0] });
-    await responderTelegram(chatId, `🏢 ${condominios[0]}\n\n📝 Qual o nome da tarefa?`);
-    return;
-  }
   await responderTelegram(chatId, "🏢 Qual condomínio?", {
     inline_keyboard: condominios.map((nome) => [{ text: nome, callback_data: `condo:${nome}` }]),
   });
