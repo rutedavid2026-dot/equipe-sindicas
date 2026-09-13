@@ -98,15 +98,26 @@ async function notionFetch(path: string, options: RequestInit = {}) {
   return json;
 }
 
-async function responderTelegram(
-  chatId: number,
-  texto: string,
-  replyMarkup?: { inline_keyboard: { text: string; callback_data: string }[][] },
-): Promise<void> {
+// Teclado fixo (ReplyKeyboardMarkup) — diferente do inline_keyboard (que fica
+// grudado numa mensagem específica e some da tela quando ela rola pra cima),
+// esse fica sempre visível embaixo da caixa de texto, em qualquer mensagem do
+// chat. Ao tocar, o Telegram manda o texto do botão como mensagem normal —
+// tratamos esse texto igual a "/novatarefa" em tratarMensagem.
+const MENU_PRINCIPAL = {
+  keyboard: [[{ text: "🆕 Nova Tarefa" }]],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
+type ReplyMarkup =
+  | { inline_keyboard: { text: string; callback_data: string }[][] }
+  | typeof MENU_PRINCIPAL;
+
+async function responderTelegram(chatId: number, texto: string, replyMarkup?: ReplyMarkup): Promise<void> {
   await fetch(`https://api.telegram.org/bot${telegramToken()}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: texto, reply_markup: replyMarkup }),
+    body: JSON.stringify({ chat_id: chatId, text: texto, reply_markup: replyMarkup ?? MENU_PRINCIPAL }),
   });
 }
 
@@ -290,7 +301,7 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
     return;
   }
 
-  if (/^\/novatarefa(@\w+)?\s*$/i.test(texto)) {
+  if (/^\/novatarefa(@\w+)?\s*$/i.test(texto) || texto === "🆕 Nova Tarefa") {
     await iniciarEscolhaCondominio(chatId);
     return;
   }
