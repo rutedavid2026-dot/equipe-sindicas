@@ -2,7 +2,9 @@ import { defineTool } from "@lovable.dev/mcp-js";
 import { fetchDemandas } from "../notion";
 import type { Demanda } from "../notion";
 
-const STATUS_CONCLUIDO = ["Concluído", "Feito"];
+// "Concluída" (não só "Concluído") existe de verdade (Thai Beach) — mesmo
+// bug de troca de gênero da linha abaixo. Ver src/lib/report-utils.ts.
+const STATUS_CONCLUIDO = ["Concluído", "Feito", "Concluída"];
 // "Cancelada" (não só "Cancelado") existe de verdade em bases de
 // condomínios diferentes — troca de gênero, não coberta por
 // normalizeStatus (só acento/maiúscula). Ver src/lib/report-utils.ts.

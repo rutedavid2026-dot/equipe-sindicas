@@ -1,6 +1,10 @@
 import type { Demanda } from "./notion.functions";
 
-export const STATUS_CONCLUIDO = ["Concluído", "Feito"];
+// "Concluída" (não só "Concluído") existe de verdade (Thai Beach) — mesmo
+// bug de troca de gênero já corrigido pra "Cancelada"/"Cancelado" (ver
+// STATUS_CANCELADO abaixo); levantamento das opções cadastradas de Status
+// em todas as 29 databases via API do Notion, 2026-09-13.
+export const STATUS_CONCLUIDO = ["Concluído", "Feito", "Concluída"];
 // "Cancelada" (não só "Cancelado") existe de verdade em bases de condomínios
 // diferentes — normalizeForMatch só cobre acento/maiúscula, não a troca de
 // gênero. Sem as duas formas, esses itens caíam no bucket "pendente" por

@@ -1,9 +1,9 @@
 import { defineTool } from "@lovable.dev/mcp-js";
 import { fetchDemandas } from "../notion";
 
-// "Cancelada" (não só "Cancelado") existe de verdade em bases de
-// condomínios diferentes — ver src/lib/report-utils.ts.
-const STATUS_FECHADO = ["Concluído", "Feito", "Cancelado", "Cancelada"];
+// "Cancelada"/"Concluída" (não só as formas masculinas) existem de verdade
+// em bases de condomínios diferentes — ver src/lib/report-utils.ts.
+const STATUS_FECHADO = ["Concluído", "Feito", "Concluída", "Cancelado", "Cancelada"];
 
 function normalizeStatus(s: string): string {
   return s.normalize("NFD").replace(/[̀-ͯ]/g, "").trim().toLowerCase();
