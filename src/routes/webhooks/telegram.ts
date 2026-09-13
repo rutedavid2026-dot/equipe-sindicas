@@ -98,20 +98,16 @@ async function notionFetch(path: string, options: RequestInit = {}) {
   return json;
 }
 
-// Teclado fixo (ReplyKeyboardMarkup) — diferente do inline_keyboard (que fica
-// grudado numa mensagem específica e some da tela quando ela rola pra cima),
-// esse fica sempre visível embaixo da caixa de texto, em qualquer mensagem do
-// chat. Ao tocar, o Telegram manda o texto do botão como mensagem normal —
-// tratamos esse texto igual a "/novatarefa" em tratarMensagem.
-const MENU_PRINCIPAL = {
-  keyboard: [[{ text: "🆕 Nova Tarefa" }]],
-  resize_keyboard: true,
-  is_persistent: true,
-};
+// Botão "Nova Tarefa" como inline_keyboard (grudado na própria mensagem) em
+// vez de ReplyKeyboardMarkup (teclado por baixo da caixa de texto) — o
+// teclado por baixo alterna com o teclado do sistema (some sempre que o bot
+// espera texto livre, tipo "qual o nome da tarefa?", exigindo tocar num ícone
+// pra voltar); o botão inline fica sempre visível na última mensagem do bot,
+// sem depender do estado do teclado do celular.
+const BOTAO_NOVA_TAREFA = { text: "🆕 Nova Tarefa", callback_data: "novatarefa" };
+const MENU_PRINCIPAL = { inline_keyboard: [[BOTAO_NOVA_TAREFA]] };
 
-type ReplyMarkup =
-  | { inline_keyboard: { text: string; callback_data: string }[][] }
-  | typeof MENU_PRINCIPAL;
+type ReplyMarkup = { inline_keyboard: { text: string; callback_data: string }[][] };
 
 async function responderTelegram(chatId: number, texto: string, replyMarkup?: ReplyMarkup): Promise<void> {
   await fetch(`https://api.telegram.org/bot${telegramToken()}/sendMessage`, {
@@ -269,8 +265,14 @@ async function tratarCallbackQuery(callbackQuery: {
 }): Promise<void> {
   await responderCallback(callbackQuery.id);
   const chatId = callbackQuery.message?.chat?.id;
-  if (!chatId || !callbackQuery.data?.startsWith("condo:")) return;
+  if (!chatId || !callbackQuery.data) return;
 
+  if (callbackQuery.data === "novatarefa") {
+    await iniciarEscolhaCondominio(chatId);
+    return;
+  }
+
+  if (!callbackQuery.data.startsWith("condo:")) return;
   const condominio = callbackQuery.data.slice("condo:".length);
   await salvarSessao(chatId, { step: "aguardando_tarefa", condominio });
   await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
