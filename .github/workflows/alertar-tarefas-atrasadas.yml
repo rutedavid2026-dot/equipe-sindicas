@@ -1,0 +1,21 @@
+name: Alertar tarefas atrasadas (Telegram)
+
+on:
+  schedule:
+    # Todo dia às 11:00 UTC (8h no horário de Brasília).
+    - cron: "0 11 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  alertar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/alertar-tarefas-atrasadas.mjs
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY_ALERTAS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
