@@ -232,6 +232,7 @@ async function criarTarefa({ condominio, tarefa, dias }: ComandoNovaTarefa): Pro
         Tarefas: { title: [{ text: { content: tarefa } }] },
         "Data de Início": { date: { start: hoje } },
         "Previsão (em dias)": { number: dias },
+        Condomínio: { select: { name: condominio } },
       },
     }),
   })) as { url: string };
