@@ -800,7 +800,19 @@ Não invente nada que não tenha sido dito.`;
 function resolverOpcaoFuzzy(valor: string | null, opcoesValidas: string[]): string | undefined {
   if (!valor) return undefined;
   const alvo = normalizeForMatch(valor);
-  return opcoesValidas.find((o) => normalizeForMatch(o) === alvo);
+  const exata = opcoesValidas.find((o) => normalizeForMatch(o) === alvo);
+  if (exata) return exata;
+
+  // A IA extrai prioridade/setor antes de sabermos o condomínio (e portanto
+  // as opções reais), então às vezes devolve com texto a mais (ex.: "é uma
+  // prioridade alta" em vez de só "alta") — confirmado em teste real. Aceita
+  // como batida se a opção aparecer como palavra isolada ou substring.
+  const palavras = alvo.split(/\s+/);
+  const candidatos = opcoesValidas.filter((o) => {
+    const norm = normalizeForMatch(o);
+    return palavras.includes(norm) || alvo.includes(norm);
+  });
+  return candidatos.length === 1 ? candidatos[0] : undefined;
 }
 
 function resolverResponsavelValor(
@@ -809,12 +821,21 @@ function resolverResponsavelValor(
 ): ResponsavelValor | undefined {
   if (!nome) return undefined;
   const alvo = normalizeForMatch(nome);
+  const bate = (candidato: string) => {
+    const norm = normalizeForMatch(candidato);
+    return norm === alvo || alvo.includes(norm) || norm.includes(alvo);
+  };
+  // Se mais de uma pessoa bater (ex.: "Roberto" contido em "Roberto
+  // Fernandes" e "Roberto Silva"), não arrisca escolher errado — melhor
+  // deixar em branco e perguntar por botão do que atribuir a pessoa errada.
   if (opcoesResp.tipo === "people") {
-    const encontrado = opcoesResp.opcoes.find((p) => normalizeForMatch(p.nome) === alvo);
-    return encontrado ? { tipo: "people", id: encontrado.id, nome: encontrado.nome } : undefined;
+    const candidatos = opcoesResp.opcoes.filter((p) => bate(p.nome));
+    return candidatos.length === 1
+      ? { tipo: "people", id: candidatos[0].id, nome: candidatos[0].nome }
+      : undefined;
   }
-  const encontrado = opcoesResp.opcoes.find((o) => normalizeForMatch(o) === alvo);
-  return encontrado ? { tipo: opcoesResp.tipo, nome: encontrado } : undefined;
+  const candidatos = opcoesResp.opcoes.filter(bate);
+  return candidatos.length === 1 ? { tipo: opcoesResp.tipo, nome: candidatos[0] } : undefined;
 }
 
 // Retoma o fluxo de Nova Tarefa a partir de campos já conhecidos (vindos de
