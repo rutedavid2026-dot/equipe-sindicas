@@ -363,7 +363,7 @@ type SessaoNovaTarefa = {
 
 type SessaoAtualizarTarefa = {
   fluxo: "atualizar";
-  step: "tarefa" | "status" | "texto" | "anexo" | "recebendo_anexo";
+  step: "tarefa" | "status" | "texto" | "anexo" | "recebendo_anexo" | "confirmar_audio";
   condominio: string;
   databaseId: string;
   statusOptions: string[];
@@ -373,6 +373,11 @@ type SessaoAtualizarTarefa = {
   pastaDriveId?: string;
   pastaDriveUrl?: string;
   anexosRecebidos?: number;
+  // Só usados quando a tarefa foi encontrada/atualizada via áudio: o texto
+  // fica "pendente" até a confirmação final (✅/❌) — só grava no Notion
+  // depois que a pessoa confirmar, nunca direto.
+  textoPendente?: string;
+  viaAudio?: boolean;
 };
 
 // Guarda o que a IA já extraiu de um áudio quando o condomínio não foi
@@ -390,7 +395,36 @@ type SessaoNovaPendente = {
   transcricao: string;
 };
 
-type Sessao = SessaoNovaTarefa | SessaoAtualizarTarefa | SessaoNovaPendente;
+// Mesma ideia de SessaoNovaPendente, mas pro fluxo de Atualizar: guarda a
+// transcrição + o que já foi entendido (descrição da tarefa, status, texto)
+// enquanto o condomínio ainda não foi escolhido manualmente.
+type SessaoAtualizarPendente = {
+  fluxo: "atualizar_pendente";
+  transcricao: string;
+  tarefaDescricao?: string;
+  statusTexto?: string;
+  textoAtualizacao?: string;
+};
+
+// Quando um áudio chega mas a IA não tem confiança se é "criar" ou
+// "atualizar" — guarda tudo que já foi entendido (incluindo o condomínio, se
+// identificado) até a pessoa escolher por botão, sem perder nada dito.
+type SessaoIndefinidaPendente = {
+  fluxo: "indefinida_pendente";
+  transcricao: string;
+  condominioChave?: string;
+  tarefaDescricao?: string;
+  prazoDias?: number;
+  statusTexto?: string;
+  textoAtualizacao?: string;
+};
+
+type Sessao =
+  | SessaoNovaTarefa
+  | SessaoAtualizarTarefa
+  | SessaoNovaPendente
+  | SessaoAtualizarPendente
+  | SessaoIndefinidaPendente;
 
 async function buscarLinhaSessao(
   chatId: number,
@@ -983,7 +1017,150 @@ function resolvidosIniciais(campos: {
   return resolvidos;
 }
 
-async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<void> {
+type ClassificacaoAudio = {
+  intencao: "nova" | "atualizar" | "indefinido";
+  condominio: string | null;
+  tarefaDescricao: string;
+  prazoDias: number | null;
+  statusTexto: string | null;
+  textoAtualizacao: string | null;
+};
+
+// Primeiro passo pra QUALQUER áudio: decide se é criação de tarefa nova ou
+// atualização de uma já existente, antes de extrair o resto — palavras como
+// "atualizar", "mudar o status", "já resolvi" indicam atualização; um pedido
+// descrevendo um problema novo indica criação. Indefinido quando não dá pra
+// saber com confiança (o fluxo então pergunta por botão, sem perder nada).
+async function classificarIntencaoAudio(transcricao: string): Promise<ClassificacaoAudio> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY não configurado nesta implantação.");
+  const nomesCondominios = Object.keys(CONDOMINIOS).map(
+    (chave) => NOMES_CONDOMINIOS[chave] ?? chave,
+  );
+
+  const prompt = `Você classifica um pedido falado (transcrito automaticamente, pode ter erros fonéticos,
+principalmente em nomes próprios) sobre uma tarefa de manutenção condominial em português.
+
+Transcrição: "${transcricao.replace(/"/g, '\\"')}"
+
+Responda APENAS com um JSON válido, sem texto antes ou depois, no formato:
+{"intencao": "nova" ou "atualizar" ou "indefinido", "condominio": string ou null, "tarefaDescricao": string, "prazoDias": number ou null, "statusTexto": string ou null, "textoAtualizacao": string ou null}
+
+Regras:
+- "intencao": "nova" se a pessoa está pedindo pra registrar um problema/tarefa que ainda NÃO existe no sistema; "atualizar" se está se referindo a uma tarefa JÁ CADASTRADA, pra mudar o status ou registrar um andamento (palavras como "atualizar", "atualização", "mudar o status", "já resolvi", "concluí", "finalizei" indicam isso); "indefinido" só se realmente não der pra saber.
+- "condominio": qual destes nomes foi mencionado — reconheça variações fonéticas de transcrição (ex.: "Mirajo Cacupé" ou "Mirage o Cacupé" significam "Miragio Cacupé"). Use EXATAMENTE um destes valores, ou null se nenhum bater nem aproximadamente: ${JSON.stringify(nomesCondominios)}
+- "tarefaDescricao": se "nova", a descrição da tarefa a ser criada; se "atualizar", a descrição de QUAL tarefa já existente está sendo mencionada (será usada pra buscar pelo título). Preencha sempre que der pra extrair algo.
+- "prazoDias": só relevante se "nova" — número de dias até o prazo, se mencionado (ex.: "amanhã"=1, "essa semana"=7, "duas semanas"=14, "um mês"=30). null caso contrário.
+- "statusTexto": só relevante se "atualizar" — nome do novo status mencionado, se houver, senão null.
+- "textoAtualizacao": só relevante se "atualizar" — o que deve virar o texto da última atualização (o que foi feito/observado), se houver, senão null.
+Não invente nada que não tenha sido dito.`;
+
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "openai/gpt-oss-20b",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      response_format: { type: "json_object" },
+    }),
+  });
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+    error?: { message?: string };
+  };
+  if (!res.ok) {
+    throw new Error(json.error?.message ?? `Falha ao interpretar o áudio (status ${res.status}).`);
+  }
+  const conteudo = json.choices?.[0]?.message?.content;
+  if (!conteudo) throw new Error("Resposta vazia da IA ao interpretar o áudio.");
+
+  const bruto = JSON.parse(conteudo) as {
+    intencao?: string;
+    condominio?: string | null;
+    tarefaDescricao?: string;
+    prazoDias?: number | null;
+    statusTexto?: string | null;
+    textoAtualizacao?: string | null;
+  };
+
+  const intencao =
+    bruto.intencao === "nova" || bruto.intencao === "atualizar" ? bruto.intencao : "indefinido";
+
+  return {
+    intencao,
+    condominio: bruto.condominio ?? null,
+    tarefaDescricao: (bruto.tarefaDescricao ?? "").trim(),
+    prazoDias:
+      typeof bruto.prazoDias === "number" && bruto.prazoDias >= 0
+        ? Math.round(bruto.prazoDias)
+        : null,
+    statusTexto: bruto.statusTexto ?? null,
+    textoAtualizacao: bruto.textoAtualizacao ?? null,
+  };
+}
+
+async function processarAudioNova(
+  chatId: number,
+  transcricao: string,
+  chave: string | undefined,
+  tarefa: string,
+  prazoDias: number | null,
+): Promise<void> {
+  if (!chave) {
+    await responderTelegram(
+      chatId,
+      [
+        `🎙️ Entendi: "${transcricao}"`,
+        tarefa ? `📝 ${tarefa}` : null,
+        prazoDias !== null ? `📅 Previsão: ${prazoDias} dia(s)` : null,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+    await salvarSessao(chatId, {
+      fluxo: "nova_pendente",
+      tarefa: tarefa || undefined,
+      dias: prazoDias ?? undefined,
+      transcricao,
+    });
+    await iniciarEscolhaCondominio(chatId, "nova");
+    return;
+  }
+  await processarComCondominioResolvido(chatId, chave, transcricao, tarefa, prazoDias);
+}
+
+async function processarAudioAtualizar(
+  chatId: number,
+  transcricao: string,
+  chave: string | undefined,
+  tarefaDescricao: string,
+  statusTexto: string | null,
+  textoAtualizacao: string | null,
+): Promise<void> {
+  if (!chave) {
+    await responderTelegram(chatId, `🎙️ Entendi: "${transcricao}"\n\nQual condomínio?`);
+    await salvarSessao(chatId, {
+      fluxo: "atualizar_pendente",
+      transcricao,
+      tarefaDescricao: tarefaDescricao || undefined,
+      statusTexto: statusTexto ?? undefined,
+      textoAtualizacao: textoAtualizacao ?? undefined,
+    });
+    await iniciarEscolhaCondominio(chatId, "atualizar");
+    return;
+  }
+  await processarAtualizacaoComCondominioResolvido(
+    chatId,
+    chave,
+    transcricao,
+    tarefaDescricao,
+    statusTexto,
+    textoAtualizacao,
+  );
+}
+
+async function tratarAudioTarefa(chatId: number, fileId: string): Promise<void> {
   const autorizada = (await condominiosDaSindica(chatId)).length > 0;
   if (!autorizada) {
     await responderTelegram(
@@ -996,7 +1173,7 @@ async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<vo
   if (!groqConfigurado()) {
     await responderTelegram(
       chatId,
-      "🎙️ Criar tarefa por áudio ainda não está disponível — em breve!",
+      "🎙️ Criar/atualizar tarefa por áudio ainda não está disponível — em breve!",
     );
     return;
   }
@@ -1009,44 +1186,59 @@ async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<vo
       return;
     }
 
-    const inicial = await interpretarCondominioETarefa(transcricao);
-    const chave = inicial.condominio
-      ? Object.keys(CONDOMINIOS).find((k) => (NOMES_CONDOMINIOS[k] ?? k) === inicial.condominio)
+    const classificacao = await classificarIntencaoAudio(transcricao);
+    const chave = classificacao.condominio
+      ? Object.keys(CONDOMINIOS).find(
+          (k) => (NOMES_CONDOMINIOS[k] ?? k) === classificacao.condominio,
+        )
       : undefined;
 
-    if (!chave) {
+    if (classificacao.intencao === "indefinido") {
+      await salvarSessao(chatId, {
+        fluxo: "indefinida_pendente",
+        transcricao,
+        condominioChave: chave,
+        tarefaDescricao: classificacao.tarefaDescricao || undefined,
+        prazoDias: classificacao.prazoDias ?? undefined,
+        statusTexto: classificacao.statusTexto ?? undefined,
+        textoAtualizacao: classificacao.textoAtualizacao ?? undefined,
+      });
       await responderTelegram(
         chatId,
-        [
-          `🎙️ Entendi: "${transcricao}"`,
-          inicial.tarefa ? `📝 ${inicial.tarefa}` : null,
-          inicial.prazoDias !== null ? `📅 Previsão: ${inicial.prazoDias} dia(s)` : null,
-        ]
-          .filter(Boolean)
-          .join("\n"),
+        `🎙️ Entendi: "${transcricao}"\n\nVocê quer criar uma tarefa nova ou atualizar uma já existente?`,
+        {
+          inline_keyboard: [
+            [
+              { text: "🆕 Nova Tarefa", callback_data: "audiointent:nova" },
+              { text: "🔄 Atualizar Tarefa", callback_data: "audiointent:atualizar" },
+            ],
+          ],
+        },
       );
-      // Não perde o que já foi entendido — guarda a transcrição inteira pra
-      // rodar a etapa 2 (mapeamento contra opções reais) assim que o
-      // condomínio for escolhido manualmente (ver callback "condo:").
-      await salvarSessao(chatId, {
-        fluxo: "nova_pendente",
-        tarefa: inicial.tarefa || undefined,
-        dias: inicial.prazoDias ?? undefined,
-        transcricao,
-      });
-      await iniciarEscolhaCondominio(chatId, "nova");
       return;
     }
 
-    await processarComCondominioResolvido(
+    if (classificacao.intencao === "nova") {
+      await processarAudioNova(
+        chatId,
+        transcricao,
+        chave,
+        classificacao.tarefaDescricao,
+        classificacao.prazoDias,
+      );
+      return;
+    }
+
+    await processarAudioAtualizar(
       chatId,
-      chave,
       transcricao,
-      inicial.tarefa,
-      inicial.prazoDias,
+      chave,
+      classificacao.tarefaDescricao,
+      classificacao.statusTexto,
+      classificacao.textoAtualizacao,
     );
   } catch (err) {
-    console.error("tratarAudioNovaTarefa:", err);
+    console.error("tratarAudioTarefa:", err);
     await responderTelegram(chatId, `❌ Erro ao processar o áudio: ${(err as Error).message}`);
   }
 }
@@ -1201,6 +1393,156 @@ function resumoTarefaCriada(
 // Fluxo Atualizar Tarefa
 // ---------------------------------------------------------------------------
 
+function resumoConfirmacaoAtualizacao(sessao: SessaoAtualizarTarefa): string {
+  const linhas = [`📋 ${sessao.tarefaTitulo}`, `🏢 ${sessao.condominio}`];
+  if (sessao.novoStatus) linhas.push(`🔄 Novo status: ${sessao.novoStatus}`);
+  if (sessao.textoPendente) linhas.push(`✏️ ${sessao.textoPendente}`);
+  linhas.push("", "Confirma?");
+  return linhas.join("\n");
+}
+
+const BOTOES_CONFIRMAR_AUDIO = {
+  inline_keyboard: [
+    [
+      { text: "✅ Confirmar", callback_data: "confirmaraudio:sim" },
+      { text: "❌ Cancelar", callback_data: "confirmaraudio:nao" },
+    ],
+  ],
+};
+
+// Acha, entre as tarefas em aberto, qual bate com a descrição falada — só
+// aceita se a IA achar uma correspondência clara (título EXATO da lista);
+// null/ambíguo cai na lista manual de sempre, sem arriscar atualizar a
+// tarefa errada.
+async function identificarTarefaIA(
+  descricao: string,
+  tarefas: { id: string; titulo: string }[],
+): Promise<{ id: string; titulo: string } | undefined> {
+  if (!descricao.trim() || tarefas.length === 0 || !groqConfigurado()) return undefined;
+  const apiKey = process.env.GROQ_API_KEY!;
+  const titulos = tarefas.map((t) => t.titulo);
+
+  const prompt = `Uma pessoa quer atualizar uma tarefa e descreveu ela assim: "${descricao.replace(/"/g, '\\"')}"
+
+Qual destas tarefas em aberto ela quer dizer? Responda APENAS com um JSON no formato {"tarefa": string ou null}, usando EXATAMENTE um destes títulos, ou null se nenhum bater nem aproximadamente:
+${JSON.stringify(titulos)}`;
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-20b",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+        response_format: { type: "json_object" },
+      }),
+    });
+    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const conteudo = json.choices?.[0]?.message?.content;
+    if (!conteudo) return undefined;
+    const bruto = JSON.parse(conteudo) as { tarefa?: string | null };
+    if (!bruto.tarefa) return undefined;
+    return tarefas.find((t) => t.titulo === bruto.tarefa);
+  } catch (err) {
+    console.error("identificarTarefaIA:", err);
+    return undefined;
+  }
+}
+
+async function processarAtualizacaoComCondominioResolvido(
+  chatId: number,
+  chave: string,
+  transcricao: string,
+  tarefaDescricao: string,
+  statusTexto: string | null,
+  textoAtualizacao: string | null,
+): Promise<void> {
+  const databaseId = CONDOMINIOS[chave];
+  const condominio = NOMES_CONDOMINIOS[chave] ?? chave;
+  const [tarefasAbertas, opcoes] = await Promise.all([
+    buscarTarefasAbertas(databaseId),
+    buscarSchemaCondominio(databaseId, chave),
+  ]);
+
+  if (tarefasAbertas.length === 0) {
+    await responderTelegram(chatId, `Nenhuma tarefa em aberto em ${condominio}.`, MENU_PRINCIPAL);
+    return;
+  }
+
+  const tarefaEscolhida = await identificarTarefaIA(tarefaDescricao, tarefasAbertas);
+  const novoStatus = statusTexto
+    ? resolverOpcaoFuzzy(statusTexto, opcoes.statusOptions)
+    : undefined;
+  const textoPendente = textoAtualizacao || undefined;
+
+  if (!tarefaEscolhida) {
+    await salvarSessao(chatId, {
+      fluxo: "atualizar",
+      step: "tarefa",
+      condominio,
+      databaseId,
+      statusOptions: opcoes.statusOptions,
+    });
+    await responderTelegram(
+      chatId,
+      `🎙️ Entendi: "${transcricao}"\n\nNão encontrei com certeza qual tarefa é — escolha abaixo.\n\n🏢 ${condominio}\n📋 Qual tarefa?`,
+      {
+        inline_keyboard: tarefasAbertas.map((t) => [
+          { text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` },
+        ]),
+      },
+    );
+    return;
+  }
+
+  const base: SessaoAtualizarTarefa = {
+    fluxo: "atualizar",
+    step: "status",
+    condominio,
+    databaseId,
+    statusOptions: opcoes.statusOptions,
+    pageId: tarefaEscolhida.id,
+    tarefaTitulo: tarefaEscolhida.titulo,
+    novoStatus,
+    textoPendente,
+    viaAudio: true,
+  };
+
+  if (novoStatus && textoPendente) {
+    const confirmando: SessaoAtualizarTarefa = { ...base, step: "confirmar_audio" };
+    await salvarSessao(chatId, confirmando);
+    await responderTelegram(
+      chatId,
+      `🎙️ Entendi: "${transcricao}"\n\n${resumoConfirmacaoAtualizacao(confirmando)}`,
+      BOTOES_CONFIRMAR_AUDIO,
+    );
+    return;
+  }
+
+  if (!novoStatus) {
+    await salvarSessao(chatId, base);
+    await responderTelegram(
+      chatId,
+      `🎙️ Entendi: "${transcricao}"\n\n📋 ${tarefaEscolhida.titulo}\n\nTarefa mudou de status?`,
+      {
+        inline_keyboard: [
+          ...opcoes.statusOptions.map((s) => [{ text: s, callback_data: `status:${s}` }]),
+          [{ text: "➡️ Manter o status atual", callback_data: "status:" }],
+        ],
+      },
+    );
+    return;
+  }
+
+  const semTexto: SessaoAtualizarTarefa = { ...base, step: "texto" };
+  await salvarSessao(chatId, semTexto);
+  await responderTelegram(
+    chatId,
+    `🎙️ Entendi: "${transcricao}"\n\n📋 ${tarefaEscolhida.titulo}\n🔄 Novo status: ${novoStatus}\n\n✏️ Descreva a última atualização:`,
+  );
+}
+
 async function finalizarAtualizacao(chatId: number, sessao: SessaoAtualizarTarefa): Promise<void> {
   if (sessao.pastaDriveUrl) {
     await anexarHistorico(
@@ -1344,6 +1686,63 @@ async function tratarCallbackQuery(callbackQuery: {
     return;
   }
 
+  if (data === "audiointent:nova" || data === "audiointent:atualizar") {
+    const linhaAtual = await buscarLinhaSessao(chatId);
+    const pendente =
+      linhaAtual?.sessao?.fluxo === "indefinida_pendente" ? linhaAtual.sessao : undefined;
+    if (!pendente) return;
+    await limparSessao(chatId);
+    if (data === "audiointent:nova") {
+      await processarAudioNova(
+        chatId,
+        pendente.transcricao,
+        pendente.condominioChave,
+        pendente.tarefaDescricao ?? "",
+        pendente.prazoDias ?? null,
+      );
+    } else {
+      await processarAudioAtualizar(
+        chatId,
+        pendente.transcricao,
+        pendente.condominioChave,
+        pendente.tarefaDescricao ?? "",
+        pendente.statusTexto ?? null,
+        pendente.textoAtualizacao ?? null,
+      );
+    }
+    return;
+  }
+
+  if (data === "confirmaraudio:sim" || data === "confirmaraudio:nao") {
+    const linhaAtual = await buscarLinhaSessao(chatId);
+    const sessaoConfirmar = linhaAtual?.sessao;
+    if (sessaoConfirmar?.fluxo !== "atualizar" || sessaoConfirmar.step !== "confirmar_audio")
+      return;
+
+    if (data === "confirmaraudio:nao") {
+      await limparSessao(chatId);
+      await responderTelegram(chatId, "Ok, cancelado.", MENU_PRINCIPAL);
+      return;
+    }
+
+    await atualizarTarefa(
+      sessaoConfirmar.pageId!,
+      sessaoConfirmar.novoStatus,
+      sessaoConfirmar.textoPendente ?? "",
+    );
+    const nova: SessaoAtualizarTarefa = { ...sessaoConfirmar, step: "anexo" };
+    await salvarSessao(chatId, nova);
+    await responderTelegram(chatId, "📎 Quer anexar foto, vídeo ou documento?", {
+      inline_keyboard: [
+        [
+          { text: "Sim", callback_data: "anexar:sim" },
+          { text: "Não", callback_data: "anexar:nao" },
+        ],
+      ],
+    });
+    return;
+  }
+
   if (data.startsWith("condo:")) {
     const resto = data.slice("condo:".length);
     const separador = resto.indexOf(":");
@@ -1380,7 +1779,22 @@ async function tratarCallbackQuery(callbackQuery: {
         });
       }
     } else {
-      await iniciarEscolhaTarefa(chatId, condominio, databaseId, chave);
+      const linhaAtual = await buscarLinhaSessao(chatId);
+      const pendenteAtualizar =
+        linhaAtual?.sessao?.fluxo === "atualizar_pendente" ? linhaAtual.sessao : undefined;
+
+      if (pendenteAtualizar) {
+        await processarAtualizacaoComCondominioResolvido(
+          chatId,
+          chave,
+          pendenteAtualizar.transcricao,
+          pendenteAtualizar.tarefaDescricao ?? "",
+          pendenteAtualizar.statusTexto ?? null,
+          pendenteAtualizar.textoAtualizacao ?? null,
+        );
+      } else {
+        await iniciarEscolhaTarefa(chatId, condominio, databaseId, chave);
+      }
     }
     return;
   }
@@ -1460,6 +1874,18 @@ async function tratarCallbackQuery(callbackQuery: {
 
   if (data.startsWith("status:") && sessao.fluxo === "atualizar" && sessao.step === "status") {
     const novoStatus = data.slice("status:".length) || undefined;
+    if (sessao.viaAudio && sessao.textoPendente) {
+      // Veio de áudio e o texto da atualização já tinha sido entendido —
+      // não precisa perguntar de novo, já vai direto pra confirmação.
+      const confirmando: SessaoAtualizarTarefa = { ...sessao, step: "confirmar_audio", novoStatus };
+      await salvarSessao(chatId, confirmando);
+      await responderTelegram(
+        chatId,
+        resumoConfirmacaoAtualizacao(confirmando),
+        BOTOES_CONFIRMAR_AUDIO,
+      );
+      return;
+    }
     const nova: SessaoAtualizarTarefa = { ...sessao, step: "texto", novoStatus };
     await salvarSessao(chatId, nova);
     await responderTelegram(chatId, "✏️ Descreva a última atualização:");
@@ -1559,6 +1985,22 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
   }
 
   if (sessao.fluxo === "atualizar" && sessao.step === "texto") {
+    if (sessao.viaAudio) {
+      // Veio de áudio (status já resolvido antes de chegar aqui) — confirma
+      // antes de gravar, em vez de aplicar direto como no fluxo manual.
+      const confirmando: SessaoAtualizarTarefa = {
+        ...sessao,
+        step: "confirmar_audio",
+        textoPendente: texto,
+      };
+      await salvarSessao(chatId, confirmando);
+      await responderTelegram(
+        chatId,
+        resumoConfirmacaoAtualizacao(confirmando),
+        BOTOES_CONFIRMAR_AUDIO,
+      );
+      return;
+    }
     await atualizarTarefa(sessao.pageId!, sessao.novoStatus, texto);
     const nova: SessaoAtualizarTarefa = { ...sessao, step: "anexo" };
     await salvarSessao(chatId, nova);
@@ -1649,7 +2091,7 @@ export const Route = createFileRoute("/webhooks/telegram")({
               });
             } else {
               const fileId = (message.voice ?? message.audio)!.file_id;
-              await tratarAudioNovaTarefa(chatId, fileId);
+              await tratarAudioTarefa(chatId, fileId);
             }
           } else if (chatId && message?.text) {
             await tratarMensagem(chatId, message.text);
