@@ -339,9 +339,11 @@ type ResponsavelValor =
   | { tipo: "people"; id: string; nome: string }
   | { tipo: "select" | "multi_select"; nome: string };
 
+type PassoNovaTarefa = "tarefa" | "prazo" | "responsavel" | "prioridade" | "setor";
+
 type SessaoNovaTarefa = {
   fluxo: "nova";
-  step: "tarefa" | "prazo" | "responsavel" | "prioridade" | "setor";
+  step: PassoNovaTarefa;
   condominio: string;
   databaseId: string;
   opcoes: OpcoesCondominio;
@@ -349,6 +351,14 @@ type SessaoNovaTarefa = {
   dias?: number;
   responsavelValor?: ResponsavelValor;
   prioridade?: string;
+  setor?: string;
+  // Passos já respondidos (por botão OU já preenchidos pela IA) — sem isso,
+  // ao responder manualmente um passo que a IA deixou em branco, o próximo
+  // passo perguntado seria sempre o seguinte da lista fixa, mesmo que outro
+  // campo já resolvido pela IA (confirmado em teste real: perguntava
+  // Prioridade de novo depois de responder Responsável, mesmo a IA já tendo
+  // entendido "média" antes).
+  resolvidos: PassoNovaTarefa[];
 };
 
 type SessaoAtualizarTarefa = {
@@ -843,37 +853,45 @@ function resolverResponsavelValor(
 // falta — usado tanto logo após interpretar o áudio (condomínio já
 // identificado) quanto ao escolher o condomínio manualmente depois de uma
 // tentativa de áudio que não conseguiu identificá-lo.
+function passoResolvido(sessao: SessaoNovaTarefa, passo: PassoNovaTarefa): boolean {
+  return sessao.resolvidos.includes(passo);
+}
+
+// Único lugar que decide "qual é a próxima pergunta" — usado tanto ao
+// terminar de interpretar um áudio quanto depois de CADA resposta manual por
+// botão. Fundamental: nunca decide pelo valor do campo estar vazio (isso não
+// distingue "IA não achou" de "usuário pulou de propósito"), sempre pelo que
+// já está marcado em `resolvidos`.
 async function continuarNovaTarefa(
   chatId: number,
   base: Omit<SessaoNovaTarefa, "step">,
-  setor: string | undefined,
 ): Promise<void> {
   let sessao: SessaoNovaTarefa = { ...base, step: "tarefa" };
 
-  if (!sessao.tarefa) {
+  if (!passoResolvido(sessao, "tarefa")) {
     await salvarSessao(chatId, sessao);
     await responderTelegram(chatId, "📝 Qual o nome da tarefa?");
     return;
   }
-  if (sessao.dias === undefined) {
+  if (!passoResolvido(sessao, "prazo")) {
     sessao = { ...sessao, step: "prazo" };
     await salvarSessao(chatId, sessao);
     await perguntarPrazo(chatId);
     return;
   }
-  if (!sessao.responsavelValor) {
+  if (!passoResolvido(sessao, "responsavel")) {
     sessao = { ...sessao, step: "responsavel" };
     await salvarSessao(chatId, sessao);
     await perguntarResponsavel(chatId, sessao);
     return;
   }
-  if (!sessao.prioridade) {
+  if (!passoResolvido(sessao, "prioridade")) {
     sessao = { ...sessao, step: "prioridade" };
     await salvarSessao(chatId, sessao);
     await perguntarPrioridade(chatId, sessao);
     return;
   }
-  if (!setor) {
+  if (!passoResolvido(sessao, "setor")) {
     sessao = { ...sessao, step: "setor" };
     await salvarSessao(chatId, sessao);
     await perguntarSetor(chatId, sessao);
@@ -883,22 +901,43 @@ async function continuarNovaTarefa(
   await limparSessao(chatId);
   const url = await criarTarefa({
     condominio: sessao.condominio,
-    tarefa: sessao.tarefa,
-    dias: sessao.dias,
+    tarefa: sessao.tarefa!,
+    dias: sessao.dias!,
     databaseId: sessao.databaseId,
     condominioTipo: sessao.opcoes.condominioTipo,
     statusPadrao: sessao.opcoes.statusPadrao,
     responsavelValor: sessao.responsavelValor,
     prioridade: sessao.prioridade,
     prioridadeTipo: sessao.opcoes.prioridade.tipo,
-    setor,
+    setor: sessao.setor,
     setorTipo: sessao.opcoes.setor.tipo,
   });
   await responderTelegram(
     chatId,
-    resumoTarefaCriada(sessao, sessao.prioridade, setor, url),
+    resumoTarefaCriada(sessao, sessao.prioridade, sessao.setor, url),
     MENU_PRINCIPAL,
   );
+}
+
+// Calcula quais passos já podem ser considerados resolvidos a partir dos
+// campos conhecidos (vindos da IA, de uma sessão pendente, ou de um fluxo
+// manual do zero) — um campo "vazio" aqui significa "ainda não sei", não
+// "usuário pulou" (isso só acontece quando o próprio callback do botão marca
+// o passo como resolvido explicitamente, mesmo com valor undefined).
+function resolvidosIniciais(campos: {
+  tarefa?: string;
+  dias?: number;
+  responsavelValor?: ResponsavelValor;
+  prioridade?: string;
+  setor?: string;
+}): PassoNovaTarefa[] {
+  const resolvidos: PassoNovaTarefa[] = [];
+  if (campos.tarefa) resolvidos.push("tarefa");
+  if (campos.dias !== undefined) resolvidos.push("prazo");
+  if (campos.responsavelValor) resolvidos.push("responsavel");
+  if (campos.prioridade) resolvidos.push("prioridade");
+  if (campos.setor) resolvidos.push("setor");
+  return resolvidos;
 }
 
 async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<void> {
@@ -969,20 +1008,20 @@ async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<vo
     const prioridade = resolverOpcaoFuzzy(interpretacao.prioridade, opcoes.prioridade.opcoes);
     const setor = resolverOpcaoFuzzy(interpretacao.setor, opcoes.setor.opcoes);
 
-    await continuarNovaTarefa(
-      chatId,
-      {
-        fluxo: "nova",
-        condominio,
-        databaseId,
-        opcoes,
-        tarefa: interpretacao.tarefa || undefined,
-        dias: interpretacao.prazoDias ?? undefined,
-        prioridade,
-        responsavelValor,
-      },
+    const tarefa = interpretacao.tarefa || undefined;
+    const dias = interpretacao.prazoDias ?? undefined;
+    await continuarNovaTarefa(chatId, {
+      fluxo: "nova",
+      condominio,
+      databaseId,
+      opcoes,
+      tarefa,
+      dias,
+      prioridade,
+      responsavelValor,
       setor,
-    );
+      resolvidos: resolvidosIniciais({ tarefa, dias, responsavelValor, prioridade, setor }),
+    });
   } catch (err) {
     console.error("tratarAudioNovaTarefa:", err);
     await responderTelegram(chatId, `❌ Erro ao processar o áudio: ${(err as Error).message}`);
@@ -1053,8 +1092,13 @@ async function perguntarResponsavel(chatId: number, sessao: SessaoNovaTarefa): P
 async function perguntarPrioridade(chatId: number, sessao: SessaoNovaTarefa): Promise<void> {
   const opcoes = sessao.opcoes.prioridade.opcoes;
   if (opcoes.length === 0) {
-    await salvarSessao(chatId, { ...sessao, step: "setor" });
-    await perguntarSetor(chatId, { ...sessao, step: "setor" });
+    // Base sem opções de Prioridade cadastradas — marca resolvido (sem
+    // valor) e deixa continuarNovaTarefa decidir o próximo passo de verdade,
+    // em vez de presumir que é sempre Setor.
+    await continuarNovaTarefa(chatId, {
+      ...sessao,
+      resolvidos: [...sessao.resolvidos, "prioridade"],
+    });
     return;
   }
   await responderTelegram(chatId, "🎯 Prioridade?", {
@@ -1252,35 +1296,41 @@ async function tratarCallbackQuery(callbackQuery: {
       if (pendente) {
         // Retoma o que já tinha sido entendido de um áudio anterior que não
         // conseguiu identificar o condomínio sozinho.
-        await continuarNovaTarefa(
-          chatId,
-          {
-            fluxo: "nova",
-            condominio,
-            databaseId,
-            opcoes,
-            tarefa: pendente.tarefa,
-            dias: pendente.dias,
-            prioridade: resolverOpcaoFuzzy(
-              pendente.prioridadeTexto ?? null,
-              opcoes.prioridade.opcoes,
-            ),
-            responsavelValor: resolverResponsavelValor(
-              pendente.responsavelTexto ?? null,
-              opcoes.responsavel,
-            ),
-          },
-          resolverOpcaoFuzzy(pendente.setorTexto ?? null, opcoes.setor.opcoes),
+        const responsavelValor = resolverResponsavelValor(
+          pendente.responsavelTexto ?? null,
+          opcoes.responsavel,
         );
-      } else {
-        await salvarSessao(chatId, {
+        const prioridade = resolverOpcaoFuzzy(
+          pendente.prioridadeTexto ?? null,
+          opcoes.prioridade.opcoes,
+        );
+        const setor = resolverOpcaoFuzzy(pendente.setorTexto ?? null, opcoes.setor.opcoes);
+        await continuarNovaTarefa(chatId, {
           fluxo: "nova",
-          step: "tarefa",
           condominio,
           databaseId,
           opcoes,
+          tarefa: pendente.tarefa,
+          dias: pendente.dias,
+          prioridade,
+          responsavelValor,
+          setor,
+          resolvidos: resolvidosIniciais({
+            tarefa: pendente.tarefa,
+            dias: pendente.dias,
+            responsavelValor,
+            prioridade,
+            setor,
+          }),
         });
-        await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
+      } else {
+        await continuarNovaTarefa(chatId, {
+          fluxo: "nova",
+          condominio,
+          databaseId,
+          opcoes,
+          resolvidos: [],
+        });
       }
     } else {
       await iniciarEscolhaTarefa(chatId, condominio, databaseId, chave);
@@ -1294,9 +1344,11 @@ async function tratarCallbackQuery(callbackQuery: {
 
   if (data.startsWith("prazo:") && sessao.fluxo === "nova" && sessao.step === "prazo") {
     const dias = Number(data.slice("prazo:".length));
-    const nova: SessaoNovaTarefa = { ...sessao, step: "responsavel", dias };
-    await salvarSessao(chatId, nova);
-    await perguntarResponsavel(chatId, nova);
+    await continuarNovaTarefa(chatId, {
+      ...sessao,
+      dias,
+      resolvidos: [...sessao.resolvidos, "prazo"],
+    });
     return;
   }
 
@@ -1313,43 +1365,32 @@ async function tratarCallbackQuery(callbackQuery: {
       const tipo = sessao.opcoes.responsavel.tipo;
       responsavelValor = { tipo: tipo === "people" ? "select" : tipo, nome };
     }
-    const nova: SessaoNovaTarefa = { ...sessao, step: "prioridade", responsavelValor };
-    await salvarSessao(chatId, nova);
-    await perguntarPrioridade(chatId, nova);
+    await continuarNovaTarefa(chatId, {
+      ...sessao,
+      responsavelValor,
+      resolvidos: [...sessao.resolvidos, "responsavel"],
+    });
     return;
   }
 
   if (data.startsWith("prioridade:") && sessao.fluxo === "nova" && sessao.step === "prioridade") {
     const prioridade = data.slice("prioridade:".length);
-    const nova: SessaoNovaTarefa = { ...sessao, step: "setor", prioridade };
-    await salvarSessao(chatId, nova);
-    await perguntarSetor(chatId, nova);
+    await continuarNovaTarefa(chatId, {
+      ...sessao,
+      prioridade,
+      resolvidos: [...sessao.resolvidos, "prioridade"],
+    });
     return;
   }
 
   if (data.startsWith("setor:") && sessao.fluxo === "nova" && sessao.step === "setor") {
     const valorSetor = data.slice("setor:".length);
     const setor = valorSetor === "pular" ? undefined : valorSetor;
-
-    await limparSessao(chatId);
-    const url = await criarTarefa({
-      condominio: sessao.condominio,
-      tarefa: sessao.tarefa!,
-      dias: sessao.dias!,
-      databaseId: sessao.databaseId,
-      condominioTipo: sessao.opcoes.condominioTipo,
-      statusPadrao: sessao.opcoes.statusPadrao,
-      responsavelValor: sessao.responsavelValor,
-      prioridade: sessao.prioridade,
-      prioridadeTipo: sessao.opcoes.prioridade.tipo,
+    await continuarNovaTarefa(chatId, {
+      ...sessao,
       setor,
-      setorTipo: sessao.opcoes.setor.tipo,
+      resolvidos: [...sessao.resolvidos, "setor"],
     });
-    await responderTelegram(
-      chatId,
-      resumoTarefaCriada(sessao, sessao.prioridade, setor, url),
-      MENU_PRINCIPAL,
-    );
     return;
   }
 
@@ -1462,9 +1503,11 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
   }
 
   if (sessao.fluxo === "nova" && sessao.step === "tarefa") {
-    const nova: SessaoNovaTarefa = { ...sessao, step: "prazo", tarefa: texto };
-    await salvarSessao(chatId, nova);
-    await perguntarPrazo(chatId);
+    await continuarNovaTarefa(chatId, {
+      ...sessao,
+      tarefa: texto,
+      resolvidos: [...sessao.resolvidos, "tarefa"],
+    });
     return;
   }
 
