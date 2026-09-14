@@ -666,6 +666,265 @@ async function baixarArquivoTelegram(fileId: string): Promise<ArrayBuffer> {
   return arquivoRes.arrayBuffer();
 }
 
+// ---------------------------------------------------------------------------
+// Criação de tarefa por áudio (IA) — usa a API da Groq (free tier, sem
+// binding/conta de serviço, só uma API key comum) pra transcrever
+// (Whisper) e depois extrair os campos estruturados (Llama) de um áudio
+// mandado no lugar de preencher os botões manualmente.
+// ---------------------------------------------------------------------------
+
+function groqConfigurado(): boolean {
+  return !!process.env.GROQ_API_KEY;
+}
+
+async function transcreverAudioGroq(bytes: ArrayBuffer): Promise<string> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY não configurado nesta implantação.");
+
+  const form = new FormData();
+  form.append("file", new Blob([bytes]), "audio.ogg");
+  form.append("model", "whisper-large-v3-turbo");
+  form.append("language", "pt");
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  const json = (await res.json()) as { text?: string; error?: { message?: string } };
+  if (!res.ok || json.text === undefined) {
+    throw new Error(json.error?.message ?? `Falha ao transcrever o áudio (status ${res.status}).`);
+  }
+  return json.text;
+}
+
+type CamposExtraidos = {
+  tarefa: string;
+  prazoDias: number | null;
+  responsavel: string | null;
+  prioridade: string | null;
+  setor: string | null;
+};
+
+// Manda a transcrição + as opções REAIS daquele condomínio pro modelo, e
+// depois confere se cada valor devolvido bate exatamente com uma opção
+// existente — descarta em silêncio o que a IA inventar (o passo seguinte do
+// fluxo já pergunta por botão o que ficar como null).
+async function extrairCamposTarefaGroq(
+  transcricao: string,
+  opcoes: OpcoesCondominio,
+): Promise<CamposExtraidos> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY não configurado nesta implantação.");
+
+  const responsaveis =
+    opcoes.responsavel.tipo === "people"
+      ? opcoes.responsavel.opcoes.map((p) => p.nome)
+      : opcoes.responsavel.opcoes;
+
+  const prompt = `Você extrai dados estruturados de um pedido falado de tarefa de manutenção condominial em português.
+Transcrição: "${transcricao.replace(/"/g, '\\"')}"
+
+Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, no formato:
+{"tarefa": string, "prazoDias": number ou null, "responsavel": string ou null, "prioridade": string ou null, "setor": string ou null}
+
+Regras:
+- "tarefa": descrição curta e objetiva do que precisa ser feito (reescreva de forma clara, não precisa copiar a fala literal).
+- "prazoDias": número de dias até o prazo, se mencionado (ex.: "amanhã"=1, "essa semana"=7, "duas semanas"=14, "um mês"=30). Se não for mencionado, use null.
+- "responsavel": deve ser EXATAMENTE um destes valores, ou null se ninguém for mencionado: ${JSON.stringify(responsaveis)}
+- "prioridade": deve ser EXATAMENTE um destes valores, ou null se não for mencionado: ${JSON.stringify(opcoes.prioridade.opcoes)}
+- "setor": deve ser EXATAMENTE um destes valores, ou null se não for mencionado: ${JSON.stringify(opcoes.setor.opcoes)}
+Nunca invente um valor que não esteja exatamente nas listas acima.`;
+
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      response_format: { type: "json_object" },
+    }),
+  });
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: string } }[];
+    error?: { message?: string };
+  };
+  if (!res.ok) {
+    throw new Error(json.error?.message ?? `Falha ao interpretar o áudio (status ${res.status}).`);
+  }
+  const conteudo = json.choices?.[0]?.message?.content;
+  if (!conteudo) throw new Error("Resposta vazia da IA ao interpretar o áudio.");
+
+  const bruto = JSON.parse(conteudo) as {
+    tarefa?: string;
+    prazoDias?: number | null;
+    responsavel?: string | null;
+    prioridade?: string | null;
+    setor?: string | null;
+  };
+
+  const prioridade =
+    bruto.prioridade && opcoes.prioridade.opcoes.includes(bruto.prioridade)
+      ? bruto.prioridade
+      : null;
+  const setor = bruto.setor && opcoes.setor.opcoes.includes(bruto.setor) ? bruto.setor : null;
+  const responsavel =
+    bruto.responsavel && responsaveis.includes(bruto.responsavel) ? bruto.responsavel : null;
+
+  return {
+    tarefa: (bruto.tarefa ?? "").trim(),
+    prazoDias:
+      typeof bruto.prazoDias === "number" && bruto.prazoDias >= 0
+        ? Math.round(bruto.prazoDias)
+        : null,
+    responsavel,
+    prioridade,
+    setor,
+  };
+}
+
+// Identifica o condomínio comparando o texto transcrito com os nomes reais —
+// de propósito sem IA aqui: pedir pra um modelo escolher entre 29 nomes
+// parecidos é mais arriscado que checar se o nome aparece literalmente na
+// fala. Ambíguo (0 ou mais de 1 batendo) devolve null, e o fluxo cai pra
+// pergunta por botão de sempre.
+function identificarCondominio(transcricao: string): string | null {
+  const alvo = normalizeForMatch(transcricao);
+  const candidatos = Object.keys(CONDOMINIOS).filter((chave) => {
+    const nome = normalizeForMatch(NOMES_CONDOMINIOS[chave] ?? chave);
+    return alvo.includes(nome);
+  });
+  return candidatos.length === 1 ? candidatos[0] : null;
+}
+
+function resolverResponsavelValor(
+  nome: string | null,
+  opcoesResp: OpcoesResponsavel,
+): ResponsavelValor | undefined {
+  if (!nome) return undefined;
+  if (opcoesResp.tipo === "people") {
+    const encontrado = opcoesResp.opcoes.find((p) => p.nome === nome);
+    return encontrado ? { tipo: "people", id: encontrado.id, nome: encontrado.nome } : undefined;
+  }
+  return { tipo: opcoesResp.tipo, nome };
+}
+
+async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<void> {
+  const autorizada = (await condominiosDaSindica(chatId)).length > 0;
+  if (!autorizada) {
+    await responderTelegram(
+      chatId,
+      "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
+    );
+    return;
+  }
+
+  if (!groqConfigurado()) {
+    await responderTelegram(
+      chatId,
+      "🎙️ Criar tarefa por áudio ainda não está disponível — em breve!",
+    );
+    return;
+  }
+
+  try {
+    const bytes = await baixarArquivoTelegram(fileId);
+    const transcricao = await transcreverAudioGroq(bytes);
+    if (!transcricao.trim()) {
+      await responderTelegram(chatId, "Não consegui entender o áudio — pode tentar de novo?");
+      return;
+    }
+
+    const chave = identificarCondominio(transcricao);
+    if (!chave) {
+      await responderTelegram(chatId, `🎙️ Entendi: "${transcricao}"\n\nQual condomínio?`);
+      await iniciarEscolhaCondominio(chatId, "nova");
+      return;
+    }
+
+    const databaseId = CONDOMINIOS[chave];
+    const condominio = NOMES_CONDOMINIOS[chave] ?? chave;
+    const opcoes = await buscarSchemaCondominio(databaseId, chave);
+    const extraido = await extrairCamposTarefaGroq(transcricao, opcoes);
+    const responsavelValor = resolverResponsavelValor(extraido.responsavel, opcoes.responsavel);
+
+    const resumo = [`🎙️ Entendi: "${transcricao}"`, `🏢 ${condominio}`];
+    if (extraido.tarefa) resumo.push(`📝 ${extraido.tarefa}`);
+    if (extraido.prazoDias !== null) resumo.push(`📅 Previsão: ${extraido.prazoDias} dia(s)`);
+    if (responsavelValor) resumo.push(`👤 ${responsavelValor.nome}`);
+    if (extraido.prioridade) resumo.push(`🎯 ${extraido.prioridade}`);
+    if (extraido.setor) resumo.push(`🗂️ ${extraido.setor}`);
+    await responderTelegram(chatId, resumo.join("\n"));
+
+    let sessao: SessaoNovaTarefa = {
+      fluxo: "nova",
+      step: "tarefa",
+      condominio,
+      databaseId,
+      opcoes,
+      tarefa: extraido.tarefa || undefined,
+      dias: extraido.prazoDias ?? undefined,
+      prioridade: extraido.prioridade ?? undefined,
+      responsavelValor,
+    };
+
+    // Continua o fluxo normal (mesmas perguntas/botões de sempre) a partir
+    // do primeiro campo que a IA não conseguiu preencher com confiança.
+    if (!sessao.tarefa) {
+      await salvarSessao(chatId, sessao);
+      await responderTelegram(chatId, "📝 Qual o nome da tarefa?");
+      return;
+    }
+    if (sessao.dias === undefined) {
+      sessao = { ...sessao, step: "prazo" };
+      await salvarSessao(chatId, sessao);
+      await perguntarPrazo(chatId);
+      return;
+    }
+    if (!sessao.responsavelValor) {
+      sessao = { ...sessao, step: "responsavel" };
+      await salvarSessao(chatId, sessao);
+      await perguntarResponsavel(chatId, sessao);
+      return;
+    }
+    if (!sessao.prioridade) {
+      sessao = { ...sessao, step: "prioridade" };
+      await salvarSessao(chatId, sessao);
+      await perguntarPrioridade(chatId, sessao);
+      return;
+    }
+    if (!extraido.setor) {
+      sessao = { ...sessao, step: "setor" };
+      await salvarSessao(chatId, sessao);
+      await perguntarSetor(chatId, sessao);
+      return;
+    }
+
+    const url = await criarTarefa({
+      condominio: sessao.condominio,
+      tarefa: sessao.tarefa,
+      dias: sessao.dias,
+      databaseId: sessao.databaseId,
+      condominioTipo: sessao.opcoes.condominioTipo,
+      statusPadrao: sessao.opcoes.statusPadrao,
+      responsavelValor: sessao.responsavelValor,
+      prioridade: sessao.prioridade,
+      prioridadeTipo: sessao.opcoes.prioridade.tipo,
+      setor: extraido.setor,
+      setorTipo: sessao.opcoes.setor.tipo,
+    });
+    await responderTelegram(
+      chatId,
+      resumoTarefaCriada(sessao, sessao.prioridade, extraido.setor, url),
+      MENU_PRINCIPAL,
+    );
+  } catch (err) {
+    console.error("tratarAudioNovaTarefa:", err);
+    await responderTelegram(chatId, `❌ Erro ao processar o áudio: ${(err as Error).message}`);
+  }
+}
+
 async function buscarTarefasAbertas(databaseId: string): Promise<{ id: string; titulo: string }[]> {
   const json = (await notionFetch(`databases/${databaseId}/query`, {
     method: "POST",
@@ -1177,22 +1436,32 @@ export const Route = createFileRoute("/webhooks/telegram")({
               nomeSugerido: message.document.file_name ?? "documento",
               mimeType: message.document.mime_type ?? "application/octet-stream",
             });
-          } else if (chatId && message?.voice) {
-            // Mensagem de voz gravada no próprio Telegram (ícone de microfone) —
-            // sempre chega em ogg/opus, sem nome de arquivo.
-            await tratarAnexo(chatId, {
-              fileId: message.voice.file_id,
-              nomeSugerido: "audio.ogg",
-              mimeType: message.voice.mime_type ?? "audio/ogg",
-            });
-          } else if (chatId && message?.audio) {
-            // Arquivo de áudio enviado como mídia (não gravado na hora) —
-            // tipo separado de "document" no Telegram.
-            await tratarAnexo(chatId, {
-              fileId: message.audio.file_id,
-              nomeSugerido: message.audio.file_name ?? "audio.mp3",
-              mimeType: message.audio.mime_type ?? "audio/mpeg",
-            });
+          } else if (chatId && (message?.voice || message?.audio)) {
+            // Áudio serve dois propósitos diferentes dependendo do momento:
+            // anexo de uma tarefa (fluxo Atualizar, passo "recebendo_anexo")
+            // ou criação de tarefa nova por voz (qualquer outro momento) — só
+            // dá pra saber qual é olhando a sessão em andamento.
+            const linhaSessao = await buscarLinhaSessao(chatId);
+            const emAnexo =
+              linhaSessao?.sessao?.fluxo === "atualizar" &&
+              linhaSessao.sessao.step === "recebendo_anexo";
+
+            if (emAnexo && message.voice) {
+              await tratarAnexo(chatId, {
+                fileId: message.voice.file_id,
+                nomeSugerido: "audio.ogg",
+                mimeType: message.voice.mime_type ?? "audio/ogg",
+              });
+            } else if (emAnexo && message.audio) {
+              await tratarAnexo(chatId, {
+                fileId: message.audio.file_id,
+                nomeSugerido: message.audio.file_name ?? "audio.mp3",
+                mimeType: message.audio.mime_type ?? "audio/mpeg",
+              });
+            } else {
+              const fileId = (message.voice ?? message.audio)!.file_id;
+              await tratarAudioNovaTarefa(chatId, fileId);
+            }
           } else if (chatId && message?.text) {
             await tratarMensagem(chatId, message.text);
           }
