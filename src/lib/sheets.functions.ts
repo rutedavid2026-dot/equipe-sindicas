@@ -6,6 +6,28 @@ const SPREADSHEET_ID = "1fEkPgTf6oGYknWEP6zzi8eyBTpoDDQR0goJg1D_Wed0";
 // cadastrado (compatibilidade com o deploy single-tenant original).
 const HISTORICO_GID_LEGADO = "1546449563";
 
+// Mesma âncora de report-utils.ts/CapturaSemanal.gs, duplicada de propósito
+// (ver nota acima sobre não importar módulos "de UI" aqui).
+const WEEK_ANCHOR = "2025-12-27";
+
+// Converte uma data ISO (início de semana, vinda da URL) pro número da
+// semana — usado pra achar a fotografia certa por SemanaN (número), nunca
+// comparando a string SemanaInicio diretamente: a coluna B da aba de
+// histórico é escrita pelo Apps Script como texto ISO, mas o Sheets
+// autodetecta e guarda como data de verdade (a célula nunca é formatada como
+// texto puro), então o export CSV devolve essa data no formato regional da
+// planilha (ex.: "12/09/2026"), não em ISO — uma comparação de string como
+// `r.semanaInicio === data.semanaInicio` nunca bate, e a "fotografia" cai
+// silenciosamente pro total ao vivo (sem filtro de semana nenhum) pra
+// qualquer semana escolhida. SemanaN é gravado como número puro e sobrevive
+// ao CSV sem essa reformatação.
+function weekNumberFromIso(iso: string): number {
+  const diffDays = Math.floor(
+    (new Date(iso).getTime() - new Date(WEEK_ANCHOR).getTime()) / 86_400_000,
+  );
+  return Math.max(1, Math.floor(diffDays / 7) + 1);
+}
+
 export type HistoricoResult = {
   data: Demanda[];
   semanaN: number | null;
@@ -269,7 +291,9 @@ export const getOutrosFollowUps = createServerFn({ method: "GET" }).handler(
       return {
         data: [],
         error:
-          e instanceof Error ? e.message : "Erro desconhecido ao ler a planilha de outros follow-ups",
+          e instanceof Error
+            ? e.message
+            : "Erro desconhecido ao ler a planilha de outros follow-ups",
       };
     }
   },
@@ -387,7 +411,8 @@ export const getHistoricoSemana = createServerFn({ method: "GET" })
   )
   .handler(async ({ data }): Promise<HistoricoResult> => {
     const all = await fetchAllHistoricoRows(data.condominioSlug, data.condominioSlugs);
-    const rows = all.filter((r) => r.semanaInicio === data.semanaInicio);
+    const wantedWeekN = weekNumberFromIso(data.semanaInicio);
+    const rows = all.filter((r) => r.semanaN === wantedWeekN);
 
     if (rows.length === 0) {
       return { data: [], semanaN: null, capturadoEm: null };
@@ -509,7 +534,8 @@ export const getPlanoDeAcaoVivendasSemana = createServerFn({ method: "GET" })
   .validator((input: unknown) => input as { semanaInicio: string })
   .handler(async ({ data }): Promise<PlanoDeAcaoResult> => {
     const all = await fetchPlanoDeAcaoRows();
-    const rows = all.filter((r) => r.semanaInicio === data.semanaInicio);
+    const wantedWeekN = weekNumberFromIso(data.semanaInicio);
+    const rows = all.filter((r) => r.semanaN === wantedWeekN);
 
     if (rows.length === 0) {
       return { data: [], semanaN: null, capturadoEm: null };
