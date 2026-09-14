@@ -789,13 +789,61 @@ Nunca invente um valor que não esteja exatamente nas listas acima.`;
 // parecidos é mais arriscado que checar se o nome aparece literalmente na
 // fala. Ambíguo (0 ou mais de 1 batendo) devolve null, e o fluxo cai pra
 // pergunta por botão de sempre.
-function identificarCondominio(transcricao: string): string | null {
+async function identificarCondominio(transcricao: string): Promise<string | null> {
   const alvo = normalizeForMatch(transcricao);
-  const candidatos = Object.keys(CONDOMINIOS).filter((chave) => {
+  const candidatosExatos = Object.keys(CONDOMINIOS).filter((chave) => {
     const nome = normalizeForMatch(NOMES_CONDOMINIOS[chave] ?? chave);
     return alvo.includes(nome);
   });
-  return candidatos.length === 1 ? candidatos[0] : null;
+  if (candidatosExatos.length === 1) return candidatosExatos[0];
+  if (candidatosExatos.length > 1) return null; // ambíguo — melhor perguntar
+
+  // Sem batida exata — o Whisper pode transcrever nome próprio foneticamente
+  // errado (confirmado em teste real: "Miragio Cacupé" virou "Mirajo
+  // Cacupé"). Aqui sim vale usar IA: reconhecer variação fonética contra uma
+  // lista curta e fechada é exatamente o tipo de tarefa que um modelo faz
+  // bem, diferente de "adivinhar" entre nomes do zero.
+  if (!groqConfigurado()) return null;
+  try {
+    return await identificarCondominioIA(transcricao);
+  } catch (err) {
+    console.error("identificarCondominioIA:", err);
+    return null;
+  }
+}
+
+async function identificarCondominioIA(transcricao: string): Promise<string | null> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return null;
+  const nomes = Object.keys(CONDOMINIOS).map((chave) => NOMES_CONDOMINIOS[chave] ?? chave);
+
+  const prompt = `Um áudio foi transcrito automaticamente e pode ter erros fonéticos, principalmente em nomes próprios.
+Transcrição: "${transcricao.replace(/"/g, '\\"')}"
+
+Qual destes condomínios foi mencionado (mesmo que a grafia na transcrição esteja levemente errada foneticamente)? Responda APENAS com um JSON no formato {"condominio": string ou null}, usando EXATAMENTE um destes nomes, ou null se nenhum bater nem aproximadamente:
+${JSON.stringify(nomes)}`;
+
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0,
+      response_format: { type: "json_object" },
+    }),
+  });
+  const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+  const conteudo = json.choices?.[0]?.message?.content;
+  if (!conteudo) return null;
+
+  const bruto = JSON.parse(conteudo) as { condominio?: string | null };
+  if (!bruto.condominio) return null;
+
+  const chave = Object.keys(CONDOMINIOS).find(
+    (k) => (NOMES_CONDOMINIOS[k] ?? k) === bruto.condominio,
+  );
+  return chave ?? null;
 }
 
 function resolverResponsavelValor(
@@ -836,7 +884,7 @@ async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<vo
       return;
     }
 
-    const chave = identificarCondominio(transcricao);
+    const chave = await identificarCondominio(transcricao);
     if (!chave) {
       await responderTelegram(chatId, `🎙️ Entendi: "${transcricao}"\n\nQual condomínio?`);
       await iniciarEscolhaCondominio(chatId, "nova");
