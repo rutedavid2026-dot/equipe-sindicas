@@ -365,7 +365,20 @@ type SessaoAtualizarTarefa = {
   anexosRecebidos?: number;
 };
 
-type Sessao = SessaoNovaTarefa | SessaoAtualizarTarefa;
+// Guarda o que a IA já extraiu de um áudio quando o condomínio não foi
+// identificado — sem isso, a pessoa teria que repetir tudo de novo só porque
+// faltou o condomínio. Assim que ela escolhe manualmente (callback "condo:"),
+// o fluxo retoma esses dados em vez de começar do zero.
+type SessaoNovaPendente = {
+  fluxo: "nova_pendente";
+  tarefa?: string;
+  dias?: number;
+  responsavelTexto?: string;
+  prioridadeTexto?: string;
+  setorTexto?: string;
+};
+
+type Sessao = SessaoNovaTarefa | SessaoAtualizarTarefa | SessaoNovaPendente;
 
 async function buscarLinhaSessao(
   chatId: number,
@@ -698,7 +711,8 @@ async function transcreverAudioGroq(bytes: ArrayBuffer): Promise<string> {
   return json.text;
 }
 
-type CamposExtraidos = {
+type InterpretacaoAudio = {
+  condominio: string | null;
   tarefa: string;
   prazoDias: number | null;
   responsavel: string | null;
@@ -706,35 +720,36 @@ type CamposExtraidos = {
   setor: string | null;
 };
 
-// Manda a transcrição + as opções REAIS daquele condomínio pro modelo, e
-// depois confere se cada valor devolvido bate exatamente com uma opção
-// existente — descarta em silêncio o que a IA inventar (o passo seguinte do
-// fluxo já pergunta por botão o que ficar como null).
-async function extrairCamposTarefaGroq(
-  transcricao: string,
-  opcoes: OpcoesCondominio,
-): Promise<CamposExtraidos> {
+// Uma chamada só que já tenta extrair TUDO da transcrição, incluindo o
+// condomínio (reconhecendo variação fonética de transcrição, ex.: "Mirajo
+// Cacupé"/"Mirage o Cacupé" = "Miragio Cacupé" — confirmado em teste real).
+// Os campos que dependem do condomínio (responsável/prioridade/setor) vêm
+// como texto livre aqui, ainda sem confirmar contra as opções reais daquela
+// base — isso é feito depois, com resolverOpcaoFuzzy/resolverResponsavelValor,
+// assim que soubermos qual condomínio é.
+async function interpretarAudioGroq(transcricao: string): Promise<InterpretacaoAudio> {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY não configurado nesta implantação.");
+  const nomesCondominios = Object.keys(CONDOMINIOS).map(
+    (chave) => NOMES_CONDOMINIOS[chave] ?? chave,
+  );
 
-  const responsaveis =
-    opcoes.responsavel.tipo === "people"
-      ? opcoes.responsavel.opcoes.map((p) => p.nome)
-      : opcoes.responsavel.opcoes;
+  const prompt = `Você extrai dados estruturados de um pedido falado (transcrito automaticamente, pode ter erros
+fonéticos, principalmente em nomes próprios) de tarefa de manutenção condominial em português.
 
-  const prompt = `Você extrai dados estruturados de um pedido falado de tarefa de manutenção condominial em português.
 Transcrição: "${transcricao.replace(/"/g, '\\"')}"
 
-Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, no formato:
-{"tarefa": string, "prazoDias": number ou null, "responsavel": string ou null, "prioridade": string ou null, "setor": string ou null}
+Responda APENAS com um JSON válido, sem texto antes ou depois, no formato:
+{"condominio": string ou null, "tarefa": string, "prazoDias": number ou null, "responsavel": string ou null, "prioridade": string ou null, "setor": string ou null}
 
 Regras:
-- "tarefa": descrição curta e objetiva do que precisa ser feito (reescreva de forma clara, não precisa copiar a fala literal).
-- "prazoDias": número de dias até o prazo, se mencionado (ex.: "amanhã"=1, "essa semana"=7, "duas semanas"=14, "um mês"=30). Se não for mencionado, use null.
-- "responsavel": deve ser EXATAMENTE um destes valores, ou null se ninguém for mencionado: ${JSON.stringify(responsaveis)}
-- "prioridade": deve ser EXATAMENTE um destes valores, ou null se não for mencionado: ${JSON.stringify(opcoes.prioridade.opcoes)}
-- "setor": deve ser EXATAMENTE um destes valores, ou null se não for mencionado: ${JSON.stringify(opcoes.setor.opcoes)}
-Nunca invente um valor que não esteja exatamente nas listas acima.`;
+- "condominio": qual destes nomes foi mencionado — reconheça variações fonéticas de transcrição (ex.: "Mirajo Cacupé" ou "Mirage o Cacupé" significam "Miragio Cacupé"). Use EXATAMENTE um destes valores, ou null se nenhum bater nem aproximadamente: ${JSON.stringify(nomesCondominios)}
+- "tarefa": descrição curta e objetiva do que precisa ser feito.
+- "prazoDias": número de dias até o prazo, se mencionado (ex.: "amanhã"=1, "essa semana"=7, "duas semanas"=14, "um mês"=30). null se não mencionado.
+- "responsavel": nome da pessoa mencionada como responsável, se houver, senão null.
+- "prioridade": nível de prioridade mencionado (ex.: urgente, alta, média, baixa), se houver, senão null.
+- "setor": categoria/área mencionada (ex.: elevador, jardim, segurança), se houver, senão null.
+Não invente nada que não tenha sido dito.`;
 
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -757,6 +772,7 @@ Nunca invente um valor que não esteja exatamente nas listas acima.`;
   if (!conteudo) throw new Error("Resposta vazia da IA ao interpretar o áudio.");
 
   const bruto = JSON.parse(conteudo) as {
+    condominio?: string | null;
     tarefa?: string;
     prazoDias?: number | null;
     responsavel?: string | null;
@@ -764,86 +780,27 @@ Nunca invente um valor que não esteja exatamente nas listas acima.`;
     setor?: string | null;
   };
 
-  const prioridade =
-    bruto.prioridade && opcoes.prioridade.opcoes.includes(bruto.prioridade)
-      ? bruto.prioridade
-      : null;
-  const setor = bruto.setor && opcoes.setor.opcoes.includes(bruto.setor) ? bruto.setor : null;
-  const responsavel =
-    bruto.responsavel && responsaveis.includes(bruto.responsavel) ? bruto.responsavel : null;
-
   return {
+    condominio: bruto.condominio ?? null,
     tarefa: (bruto.tarefa ?? "").trim(),
     prazoDias:
       typeof bruto.prazoDias === "number" && bruto.prazoDias >= 0
         ? Math.round(bruto.prazoDias)
         : null,
-    responsavel,
-    prioridade,
-    setor,
+    responsavel: bruto.responsavel ?? null,
+    prioridade: bruto.prioridade ?? null,
+    setor: bruto.setor ?? null,
   };
 }
 
-// Identifica o condomínio comparando o texto transcrito com os nomes reais —
-// de propósito sem IA aqui: pedir pra um modelo escolher entre 29 nomes
-// parecidos é mais arriscado que checar se o nome aparece literalmente na
-// fala. Ambíguo (0 ou mais de 1 batendo) devolve null, e o fluxo cai pra
-// pergunta por botão de sempre.
-async function identificarCondominio(transcricao: string): Promise<string | null> {
-  const alvo = normalizeForMatch(transcricao);
-  const candidatosExatos = Object.keys(CONDOMINIOS).filter((chave) => {
-    const nome = normalizeForMatch(NOMES_CONDOMINIOS[chave] ?? chave);
-    return alvo.includes(nome);
-  });
-  if (candidatosExatos.length === 1) return candidatosExatos[0];
-  if (candidatosExatos.length > 1) return null; // ambíguo — melhor perguntar
-
-  // Sem batida exata — o Whisper pode transcrever nome próprio foneticamente
-  // errado (confirmado em teste real: "Miragio Cacupé" virou "Mirajo
-  // Cacupé"). Aqui sim vale usar IA: reconhecer variação fonética contra uma
-  // lista curta e fechada é exatamente o tipo de tarefa que um modelo faz
-  // bem, diferente de "adivinhar" entre nomes do zero.
-  if (!groqConfigurado()) return null;
-  try {
-    return await identificarCondominioIA(transcricao);
-  } catch (err) {
-    console.error("identificarCondominioIA:", err);
-    return null;
-  }
-}
-
-async function identificarCondominioIA(transcricao: string): Promise<string | null> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return null;
-  const nomes = Object.keys(CONDOMINIOS).map((chave) => NOMES_CONDOMINIOS[chave] ?? chave);
-
-  const prompt = `Um áudio foi transcrito automaticamente e pode ter erros fonéticos, principalmente em nomes próprios.
-Transcrição: "${transcricao.replace(/"/g, '\\"')}"
-
-Qual destes condomínios foi mencionado (mesmo que a grafia na transcrição esteja levemente errada foneticamente)? Responda APENAS com um JSON no formato {"condominio": string ou null}, usando EXATAMENTE um destes nomes, ou null se nenhum bater nem aproximadamente:
-${JSON.stringify(nomes)}`;
-
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0,
-      response_format: { type: "json_object" },
-    }),
-  });
-  const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
-  const conteudo = json.choices?.[0]?.message?.content;
-  if (!conteudo) return null;
-
-  const bruto = JSON.parse(conteudo) as { condominio?: string | null };
-  if (!bruto.condominio) return null;
-
-  const chave = Object.keys(CONDOMINIOS).find(
-    (k) => (NOMES_CONDOMINIOS[k] ?? k) === bruto.condominio,
-  );
-  return chave ?? null;
+// Confere um valor livre (dito pela IA) contra uma lista de opções REAIS,
+// ignorando acento/maiúscula (normalizeForMatch) — mais tolerante que
+// comparação exata, já que a IA às vezes devolve a opção com capitalização
+// ligeiramente diferente da cadastrada no Notion.
+function resolverOpcaoFuzzy(valor: string | null, opcoesValidas: string[]): string | undefined {
+  if (!valor) return undefined;
+  const alvo = normalizeForMatch(valor);
+  return opcoesValidas.find((o) => normalizeForMatch(o) === alvo);
 }
 
 function resolverResponsavelValor(
@@ -851,11 +808,76 @@ function resolverResponsavelValor(
   opcoesResp: OpcoesResponsavel,
 ): ResponsavelValor | undefined {
   if (!nome) return undefined;
+  const alvo = normalizeForMatch(nome);
   if (opcoesResp.tipo === "people") {
-    const encontrado = opcoesResp.opcoes.find((p) => p.nome === nome);
+    const encontrado = opcoesResp.opcoes.find((p) => normalizeForMatch(p.nome) === alvo);
     return encontrado ? { tipo: "people", id: encontrado.id, nome: encontrado.nome } : undefined;
   }
-  return { tipo: opcoesResp.tipo, nome };
+  const encontrado = opcoesResp.opcoes.find((o) => normalizeForMatch(o) === alvo);
+  return encontrado ? { tipo: opcoesResp.tipo, nome: encontrado } : undefined;
+}
+
+// Retoma o fluxo de Nova Tarefa a partir de campos já conhecidos (vindos de
+// IA ou de uma sessão pendente), perguntando por botão só o que realmente
+// falta — usado tanto logo após interpretar o áudio (condomínio já
+// identificado) quanto ao escolher o condomínio manualmente depois de uma
+// tentativa de áudio que não conseguiu identificá-lo.
+async function continuarNovaTarefa(
+  chatId: number,
+  base: Omit<SessaoNovaTarefa, "step">,
+  setor: string | undefined,
+): Promise<void> {
+  let sessao: SessaoNovaTarefa = { ...base, step: "tarefa" };
+
+  if (!sessao.tarefa) {
+    await salvarSessao(chatId, sessao);
+    await responderTelegram(chatId, "📝 Qual o nome da tarefa?");
+    return;
+  }
+  if (sessao.dias === undefined) {
+    sessao = { ...sessao, step: "prazo" };
+    await salvarSessao(chatId, sessao);
+    await perguntarPrazo(chatId);
+    return;
+  }
+  if (!sessao.responsavelValor) {
+    sessao = { ...sessao, step: "responsavel" };
+    await salvarSessao(chatId, sessao);
+    await perguntarResponsavel(chatId, sessao);
+    return;
+  }
+  if (!sessao.prioridade) {
+    sessao = { ...sessao, step: "prioridade" };
+    await salvarSessao(chatId, sessao);
+    await perguntarPrioridade(chatId, sessao);
+    return;
+  }
+  if (!setor) {
+    sessao = { ...sessao, step: "setor" };
+    await salvarSessao(chatId, sessao);
+    await perguntarSetor(chatId, sessao);
+    return;
+  }
+
+  await limparSessao(chatId);
+  const url = await criarTarefa({
+    condominio: sessao.condominio,
+    tarefa: sessao.tarefa,
+    dias: sessao.dias,
+    databaseId: sessao.databaseId,
+    condominioTipo: sessao.opcoes.condominioTipo,
+    statusPadrao: sessao.opcoes.statusPadrao,
+    responsavelValor: sessao.responsavelValor,
+    prioridade: sessao.prioridade,
+    prioridadeTipo: sessao.opcoes.prioridade.tipo,
+    setor,
+    setorTipo: sessao.opcoes.setor.tipo,
+  });
+  await responderTelegram(
+    chatId,
+    resumoTarefaCriada(sessao, sessao.prioridade, setor, url),
+    MENU_PRINCIPAL,
+  );
 }
 
 async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<void> {
@@ -884,9 +906,34 @@ async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<vo
       return;
     }
 
-    const chave = await identificarCondominio(transcricao);
+    const interpretacao = await interpretarAudioGroq(transcricao);
+    const chave = interpretacao.condominio
+      ? Object.keys(CONDOMINIOS).find(
+          (k) => (NOMES_CONDOMINIOS[k] ?? k) === interpretacao.condominio,
+        )
+      : undefined;
+
+    const resumo = [`🎙️ Entendi: "${transcricao}"`];
+    if (chave) resumo.push(`🏢 ${NOMES_CONDOMINIOS[chave] ?? chave}`);
+    if (interpretacao.tarefa) resumo.push(`📝 ${interpretacao.tarefa}`);
+    if (interpretacao.prazoDias !== null)
+      resumo.push(`📅 Previsão: ${interpretacao.prazoDias} dia(s)`);
+    if (interpretacao.responsavel) resumo.push(`👤 ${interpretacao.responsavel}`);
+    if (interpretacao.prioridade) resumo.push(`🎯 ${interpretacao.prioridade}`);
+    if (interpretacao.setor) resumo.push(`🗂️ ${interpretacao.setor}`);
+    await responderTelegram(chatId, resumo.join("\n"));
+
     if (!chave) {
-      await responderTelegram(chatId, `🎙️ Entendi: "${transcricao}"\n\nQual condomínio?`);
+      // Não perde o que já foi entendido — guarda pra retomar assim que o
+      // condomínio for escolhido manualmente (ver callback "condo:").
+      await salvarSessao(chatId, {
+        fluxo: "nova_pendente",
+        tarefa: interpretacao.tarefa || undefined,
+        dias: interpretacao.prazoDias ?? undefined,
+        responsavelTexto: interpretacao.responsavel ?? undefined,
+        prioridadeTexto: interpretacao.prioridade ?? undefined,
+        setorTexto: interpretacao.setor ?? undefined,
+      });
       await iniciarEscolhaCondominio(chatId, "nova");
       return;
     }
@@ -894,78 +941,26 @@ async function tratarAudioNovaTarefa(chatId: number, fileId: string): Promise<vo
     const databaseId = CONDOMINIOS[chave];
     const condominio = NOMES_CONDOMINIOS[chave] ?? chave;
     const opcoes = await buscarSchemaCondominio(databaseId, chave);
-    const extraido = await extrairCamposTarefaGroq(transcricao, opcoes);
-    const responsavelValor = resolverResponsavelValor(extraido.responsavel, opcoes.responsavel);
+    const responsavelValor = resolverResponsavelValor(
+      interpretacao.responsavel,
+      opcoes.responsavel,
+    );
+    const prioridade = resolverOpcaoFuzzy(interpretacao.prioridade, opcoes.prioridade.opcoes);
+    const setor = resolverOpcaoFuzzy(interpretacao.setor, opcoes.setor.opcoes);
 
-    const resumo = [`🎙️ Entendi: "${transcricao}"`, `🏢 ${condominio}`];
-    if (extraido.tarefa) resumo.push(`📝 ${extraido.tarefa}`);
-    if (extraido.prazoDias !== null) resumo.push(`📅 Previsão: ${extraido.prazoDias} dia(s)`);
-    if (responsavelValor) resumo.push(`👤 ${responsavelValor.nome}`);
-    if (extraido.prioridade) resumo.push(`🎯 ${extraido.prioridade}`);
-    if (extraido.setor) resumo.push(`🗂️ ${extraido.setor}`);
-    await responderTelegram(chatId, resumo.join("\n"));
-
-    let sessao: SessaoNovaTarefa = {
-      fluxo: "nova",
-      step: "tarefa",
-      condominio,
-      databaseId,
-      opcoes,
-      tarefa: extraido.tarefa || undefined,
-      dias: extraido.prazoDias ?? undefined,
-      prioridade: extraido.prioridade ?? undefined,
-      responsavelValor,
-    };
-
-    // Continua o fluxo normal (mesmas perguntas/botões de sempre) a partir
-    // do primeiro campo que a IA não conseguiu preencher com confiança.
-    if (!sessao.tarefa) {
-      await salvarSessao(chatId, sessao);
-      await responderTelegram(chatId, "📝 Qual o nome da tarefa?");
-      return;
-    }
-    if (sessao.dias === undefined) {
-      sessao = { ...sessao, step: "prazo" };
-      await salvarSessao(chatId, sessao);
-      await perguntarPrazo(chatId);
-      return;
-    }
-    if (!sessao.responsavelValor) {
-      sessao = { ...sessao, step: "responsavel" };
-      await salvarSessao(chatId, sessao);
-      await perguntarResponsavel(chatId, sessao);
-      return;
-    }
-    if (!sessao.prioridade) {
-      sessao = { ...sessao, step: "prioridade" };
-      await salvarSessao(chatId, sessao);
-      await perguntarPrioridade(chatId, sessao);
-      return;
-    }
-    if (!extraido.setor) {
-      sessao = { ...sessao, step: "setor" };
-      await salvarSessao(chatId, sessao);
-      await perguntarSetor(chatId, sessao);
-      return;
-    }
-
-    const url = await criarTarefa({
-      condominio: sessao.condominio,
-      tarefa: sessao.tarefa,
-      dias: sessao.dias,
-      databaseId: sessao.databaseId,
-      condominioTipo: sessao.opcoes.condominioTipo,
-      statusPadrao: sessao.opcoes.statusPadrao,
-      responsavelValor: sessao.responsavelValor,
-      prioridade: sessao.prioridade,
-      prioridadeTipo: sessao.opcoes.prioridade.tipo,
-      setor: extraido.setor,
-      setorTipo: sessao.opcoes.setor.tipo,
-    });
-    await responderTelegram(
+    await continuarNovaTarefa(
       chatId,
-      resumoTarefaCriada(sessao, sessao.prioridade, extraido.setor, url),
-      MENU_PRINCIPAL,
+      {
+        fluxo: "nova",
+        condominio,
+        databaseId,
+        opcoes,
+        tarefa: interpretacao.tarefa || undefined,
+        dias: interpretacao.prazoDias ?? undefined,
+        prioridade,
+        responsavelValor,
+      },
+      setor,
     );
   } catch (err) {
     console.error("tratarAudioNovaTarefa:", err);
@@ -1229,8 +1224,43 @@ async function tratarCallbackQuery(callbackQuery: {
 
     if (fluxo === "nova") {
       const opcoes = await buscarSchemaCondominio(databaseId, chave);
-      await salvarSessao(chatId, { fluxo: "nova", step: "tarefa", condominio, databaseId, opcoes });
-      await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
+      const linhaAtual = await buscarLinhaSessao(chatId);
+      const pendente =
+        linhaAtual?.sessao?.fluxo === "nova_pendente" ? linhaAtual.sessao : undefined;
+
+      if (pendente) {
+        // Retoma o que já tinha sido entendido de um áudio anterior que não
+        // conseguiu identificar o condomínio sozinho.
+        await continuarNovaTarefa(
+          chatId,
+          {
+            fluxo: "nova",
+            condominio,
+            databaseId,
+            opcoes,
+            tarefa: pendente.tarefa,
+            dias: pendente.dias,
+            prioridade: resolverOpcaoFuzzy(
+              pendente.prioridadeTexto ?? null,
+              opcoes.prioridade.opcoes,
+            ),
+            responsavelValor: resolverResponsavelValor(
+              pendente.responsavelTexto ?? null,
+              opcoes.responsavel,
+            ),
+          },
+          resolverOpcaoFuzzy(pendente.setorTexto ?? null, opcoes.setor.opcoes),
+        );
+      } else {
+        await salvarSessao(chatId, {
+          fluxo: "nova",
+          step: "tarefa",
+          condominio,
+          databaseId,
+          opcoes,
+        });
+        await responderTelegram(chatId, `🏢 ${condominio}\n\n📝 Qual o nome da tarefa?`);
+      }
     } else {
       await iniciarEscolhaTarefa(chatId, condominio, databaseId, chave);
     }
