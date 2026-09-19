@@ -203,8 +203,20 @@ async function responderCallback(callbackQueryId: string): Promise<void> {
   });
 }
 
+const TEXTO_MENU =
+  "O que você quer fazer?\n\n" +
+  "👇 Toque em um botão:\n" +
+  "🆕 Nova Tarefa — cadastra uma tarefa em um condomínio\n" +
+  "🔄 Atualizar Tarefa — muda o status e registra a última atualização de uma tarefa\n\n" +
+  "🎙️ Ou, mais rápido, grave um áudio dizendo:\n" +
+  "• Nova: o condomínio, a tarefa, o prazo e, se quiser, responsável, prioridade e setor. " +
+  'Ex.: "No Miragio, trocar lâmpada do salão de festas, prazo 7 dias, prioridade alta".\n' +
+  "• Atualizar: o condomínio, qual tarefa, o novo status e o que aconteceu. " +
+  'Ex.: "Atualizar no Jazz Club a tarefa do elevador, concluído, técnico já trocou a peça".\n' +
+  "Eu pergunto por botões só o que faltar.";
+
 async function mostrarMenuInicial(chatId: number): Promise<void> {
-  await responderTelegram(chatId, "O que você quer fazer?", MENU_PRINCIPAL);
+  await responderTelegram(chatId, TEXTO_MENU, MENU_PRINCIPAL);
 }
 
 // Verifica se o chat está cadastrado na base "Telegram" — estar lá é a
@@ -265,7 +277,11 @@ async function garantirCadastro(chatId: number, texto: string | null): Promise<b
   if (emCadastro && nome && !nome.startsWith("/")) {
     await cadastrarSindica(chatId, nome);
     await limparSessao(chatId);
-    await responderTelegram(chatId, `Prontinho, ${nome}! Você já pode usar o bot.`, MENU_PRINCIPAL);
+    await responderTelegram(
+      chatId,
+      `Prontinho, ${nome}! Você já pode usar o bot.\n\n${TEXTO_MENU}`,
+      MENU_PRINCIPAL,
+    );
     return false;
   }
 
@@ -278,7 +294,10 @@ async function garantirCadastro(chatId: number, texto: string | null): Promise<b
   }
 
   await salvarSessao(chatId, { fluxo: "cadastro", step: "nome" });
-  await responderTelegram(chatId, "Olá! Ainda não tenho seu cadastro por aqui. Qual é o seu nome?");
+  await responderTelegram(
+    chatId,
+    "Olá! Sou o bot da Equipe Síndicas: crio e atualizo tarefas dos condomínios direto por aqui.\n\nAntes de começar, preciso te cadastrar. Qual é o seu nome? (responda em uma mensagem de texto)",
+  );
   return false;
 }
 
@@ -1001,7 +1020,10 @@ async function continuarNovaTarefa(
 
   if (!passoResolvido(sessao, "tarefa")) {
     await salvarSessao(chatId, sessao);
-    await responderTelegram(chatId, "📝 Qual o nome da tarefa?");
+    await responderTelegram(
+      chatId,
+      '📝 Qual o nome da tarefa? Digite em uma mensagem de texto (ex.: "Trocar lâmpada do hall").',
+    );
     return;
   }
   if (!passoResolvido(sessao, "prazo")) {
@@ -1045,7 +1067,7 @@ async function continuarNovaTarefa(
   });
   await responderTelegram(
     chatId,
-    resumoTarefaCriada(sessao, sessao.prioridade, sessao.setor, url),
+    `${resumoTarefaCriada(sessao, sessao.prioridade, sessao.setor, url)}\n\nPrecisa de mais alguma coisa? Toque em um botão ou mande um áudio.`,
     MENU_PRINCIPAL,
   );
 }
@@ -1229,7 +1251,10 @@ async function tratarAudioTarefa(chatId: number, fileId: string): Promise<void> 
     const bytes = await baixarArquivoTelegram(fileId);
     const transcricao = await transcreverAudioGroq(bytes);
     if (!transcricao.trim()) {
-      await responderTelegram(chatId, "Não consegui entender o áudio — pode tentar de novo?");
+      await responderTelegram(
+        chatId,
+        'Não consegui entender o áudio — pode tentar de novo? Fale pausado e diga o condomínio e a tarefa (ex.: "Nova tarefa no Jazz Club: revisar o portão, prazo 3 dias").',
+      );
       return;
     }
 
@@ -1364,7 +1389,7 @@ async function buscarTarefasAbertas(databaseId: string): Promise<{ id: string; t
 // ---------------------------------------------------------------------------
 
 async function perguntarPrazo(chatId: number): Promise<void> {
-  await responderTelegram(chatId, "📅 Qual o prazo?", {
+  await responderTelegram(chatId, "📅 Qual o prazo? Toque em uma das opções.", {
     inline_keyboard: [
       [
         { text: "Hoje", callback_data: "prazo:0" },
@@ -1391,7 +1416,9 @@ async function perguntarResponsavel(chatId: number, sessao: SessaoNovaTarefa): P
     for (const nome of r.opcoes) botoes.push([{ text: nome, callback_data: `resp:nome:${nome}` }]);
   }
   botoes.push([{ text: "➡️ Pular", callback_data: "resp:pular" }]);
-  await responderTelegram(chatId, "👤 Responsável?", { inline_keyboard: botoes });
+  await responderTelegram(chatId, "👤 Responsável? Toque em uma opção (ou pule).", {
+    inline_keyboard: botoes,
+  });
 }
 
 async function perguntarPrioridade(chatId: number, sessao: SessaoNovaTarefa): Promise<void> {
@@ -1406,7 +1433,7 @@ async function perguntarPrioridade(chatId: number, sessao: SessaoNovaTarefa): Pr
     });
     return;
   }
-  await responderTelegram(chatId, "🎯 Prioridade?", {
+  await responderTelegram(chatId, "🎯 Prioridade? Toque em uma opção.", {
     inline_keyboard: opcoes.map((nome) => [{ text: nome, callback_data: `prioridade:${nome}` }]),
   });
 }
@@ -1415,7 +1442,9 @@ async function perguntarSetor(chatId: number, sessao: SessaoNovaTarefa): Promise
   const opcoes = sessao.opcoes.setor.opcoes;
   const botoes = opcoes.map((nome) => [{ text: nome, callback_data: `setor:${nome}` }]);
   botoes.push([{ text: "➡️ Pular", callback_data: "setor:pular" }]);
-  await responderTelegram(chatId, "🗂️ Setor?", { inline_keyboard: botoes });
+  await responderTelegram(chatId, "🗂️ Setor? Toque em uma opção (ou pule).", {
+    inline_keyboard: botoes,
+  });
 }
 
 function resumoTarefaCriada(
@@ -1602,7 +1631,7 @@ async function finalizarAtualizacao(chatId: number, sessao: SessaoAtualizarTaref
   const anexoTexto = sessao.pastaDriveUrl ? `\n📎 Anexos: ${sessao.pastaDriveUrl}` : "";
   await responderTelegram(
     chatId,
-    `✅ Tarefa atualizada: ${sessao.tarefaTitulo}\n🏢 ${sessao.condominio}${statusTexto}${anexoTexto}`,
+    `✅ Tarefa atualizada: ${sessao.tarefaTitulo}\n🏢 ${sessao.condominio}${statusTexto}${anexoTexto}\n\nPrecisa de mais alguma coisa? Toque em um botão ou mande um áudio.`,
     MENU_PRINCIPAL,
   );
 }
@@ -1670,11 +1699,15 @@ async function iniciarEscolhaTarefa(
     databaseId,
     statusOptions: schema.statusOptions,
   });
-  await responderTelegram(chatId, `🏢 ${condominio}\n\n📋 Qual tarefa?`, {
-    inline_keyboard: tarefas.map((t) => [
-      { text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` },
-    ]),
-  });
+  await responderTelegram(
+    chatId,
+    `🏢 ${condominio}\n\n📋 Qual tarefa você quer atualizar? Toque na tarefa abaixo.`,
+    {
+      inline_keyboard: tarefas.map((t) => [
+        { text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` },
+      ]),
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1689,7 +1722,7 @@ async function iniciarEscolhaCondominio(
   const chaves = Object.keys(CONDOMINIOS).sort((a, b) =>
     NOMES_CONDOMINIOS[a].localeCompare(NOMES_CONDOMINIOS[b], "pt-BR"),
   );
-  await responderTelegram(chatId, "🏢 Qual condomínio?", {
+  await responderTelegram(chatId, "🏢 Qual condomínio? Toque em um dos botões abaixo.", {
     inline_keyboard: chaves.map((chave) => [
       { text: NOMES_CONDOMINIOS[chave], callback_data: `condo:${fluxo}:${chave}` },
     ]),
@@ -1761,7 +1794,11 @@ async function tratarCallbackQuery(callbackQuery: {
 
     if (data === "confirmaraudio:nao") {
       await limparSessao(chatId);
-      await responderTelegram(chatId, "Ok, cancelado.", MENU_PRINCIPAL);
+      await responderTelegram(
+        chatId,
+        `Ok, cancelado.${"\n\nPrecisa de mais alguma coisa? Toque em um botão ou mande um áudio."}`,
+        MENU_PRINCIPAL,
+      );
       return;
     }
 
@@ -1772,14 +1809,18 @@ async function tratarCallbackQuery(callbackQuery: {
     );
     const nova: SessaoAtualizarTarefa = { ...sessaoConfirmar, step: "anexo" };
     await salvarSessao(chatId, nova);
-    await responderTelegram(chatId, "📎 Quer anexar foto, vídeo ou documento?", {
-      inline_keyboard: [
-        [
-          { text: "Sim", callback_data: "anexar:sim" },
-          { text: "Não", callback_data: "anexar:nao" },
+    await responderTelegram(
+      chatId,
+      "📎 Quer anexar foto, vídeo ou documento a esta tarefa? Toque em Sim ou Não.",
+      {
+        inline_keyboard: [
+          [
+            { text: "Sim", callback_data: "anexar:sim" },
+            { text: "Não", callback_data: "anexar:nao" },
+          ],
         ],
-      ],
-    });
+      },
+    );
     return;
   }
 
@@ -1903,12 +1944,16 @@ async function tratarCallbackQuery(callbackQuery: {
     const titulo = pagina.properties["Tarefas"]?.title?.[0]?.plain_text ?? "(sem título)";
     const nova: SessaoAtualizarTarefa = { ...sessao, step: "status", pageId, tarefaTitulo: titulo };
     await salvarSessao(chatId, nova);
-    await responderTelegram(chatId, `📋 ${titulo}\n\nTarefa mudou de status?`, {
-      inline_keyboard: [
-        ...sessao.statusOptions.map((s) => [{ text: s, callback_data: `status:${s}` }]),
-        [{ text: "➡️ Manter o status atual", callback_data: "status:" }],
-      ],
-    });
+    await responderTelegram(
+      chatId,
+      `📋 ${titulo}\n\nA tarefa mudou de status? Toque no novo status, ou em "Manter o status atual".`,
+      {
+        inline_keyboard: [
+          ...sessao.statusOptions.map((s) => [{ text: s, callback_data: `status:${s}` }]),
+          [{ text: "➡️ Manter o status atual", callback_data: "status:" }],
+        ],
+      },
+    );
     return;
   }
 
@@ -1928,7 +1973,10 @@ async function tratarCallbackQuery(callbackQuery: {
     }
     const nova: SessaoAtualizarTarefa = { ...sessao, step: "texto", novoStatus };
     await salvarSessao(chatId, nova);
-    await responderTelegram(chatId, "✏️ Descreva a última atualização:");
+    await responderTelegram(
+      chatId,
+      "✏️ Descreva a última atualização em uma mensagem de texto (o que foi feito, próximos passos, etc.).",
+    );
     return;
   }
 
@@ -2037,16 +2085,22 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
     await atualizarTarefa(sessao.pageId!, sessao.novoStatus, texto);
     const nova: SessaoAtualizarTarefa = { ...sessao, step: "anexo" };
     await salvarSessao(chatId, nova);
-    await responderTelegram(chatId, "📎 Quer anexar foto, vídeo ou documento?", {
-      inline_keyboard: [
-        [
-          { text: "Sim", callback_data: "anexar:sim" },
-          { text: "Não", callback_data: "anexar:nao" },
+    await responderTelegram(
+      chatId,
+      "📎 Quer anexar foto, vídeo ou documento a esta tarefa? Toque em Sim ou Não.",
+      {
+        inline_keyboard: [
+          [
+            { text: "Sim", callback_data: "anexar:sim" },
+            { text: "Não", callback_data: "anexar:nao" },
+          ],
         ],
-      ],
-    });
+      },
+    );
     return;
   }
+
+  await responderTelegram(chatId, `Não entendi essa mensagem.\n\n${TEXTO_MENU}`, MENU_PRINCIPAL);
 }
 
 export const Route = createFileRoute("/webhooks/telegram")({
