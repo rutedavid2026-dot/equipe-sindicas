@@ -25,10 +25,15 @@ import { isFechada, normalizeForMatch } from "@/lib/report-utils";
 // Camada 1 (comando único, ainda funciona): /novatarefa Condomínio | Tarefa
 // | Dias — atalho pra quem já sabe o formato, sem passar pelos botões.
 //
-// Autorização: só responde a chat_ids cadastrados como síndica ativa na
+// Autorização: cada chat_id precisa estar cadastrado como síndica ativa na
 // database "Síndicas" (mesma usada pela automação de alertas em
-// scripts/alertar-tarefas-atrasadas.mjs) — evita que qualquer pessoa que
-// descubra o bot crie tarefas.
+// scripts/alertar-tarefas-atrasadas.mjs) — mas isso agora acontece por
+// autocadastro (ver garantirCadastro): quem manda qualquer mensagem sem
+// estar cadastrada é perguntada o nome, e assim que responde já vira uma
+// linha ativa na base e fica liberada dali em diante, sem precisar que
+// alguém descubra o chat_id dela e cadastre manualmente antes. Não há mais
+// nenhum controle de quem pode se autocadastrar — qualquer pessoa que
+// descobrir o @equipesindicas_bot e mandar mensagem ganha acesso.
 //
 // Setup necessário (variáveis de ambiente nesta implantação):
 //   TELEGRAM_BOT_TOKEN_ALERTAS — token do bot @equipesindicas_bot
@@ -204,10 +209,13 @@ async function mostrarMenuInicial(chatId: number): Promise<void> {
   await responderTelegram(chatId, "O que você quer fazer?", MENU_PRINCIPAL);
 }
 
-// Retorna os condomínios que essa síndica gerencia (vazio = não autorizada
-// ou nenhum condomínio mapeado — os dois casos tratados como "não pode usar
-// o bot" pelo chamador).
-async function condominiosDaSindica(chatId: number): Promise<string[]> {
+// Verifica se o chat já está cadastrado como síndica ativa na base
+// "Síndicas" — não depende do campo "Condominios" estar preenchido (esse
+// campo hoje só serve pro roteamento do alerta semanal, ver
+// scripts/alertar-tarefas-atrasadas.mjs; o seletor de condomínio deste bot
+// sempre lista todos, então uma síndica autocadastrada sem nenhum
+// condomínio marcado ainda pode usar o bot normalmente).
+async function estaAutorizada(chatId: number): Promise<boolean> {
   const json = (await notionFetch(`databases/${SINDICAS_DB_ID}/query`, {
     method: "POST",
     body: JSON.stringify({
@@ -218,15 +226,70 @@ async function condominiosDaSindica(chatId: number): Promise<string[]> {
         ],
       },
     }),
-  })) as { results: { properties: Record<string, { multi_select?: { name: string }[] }> }[] };
+  })) as { results: unknown[] };
+  return json.results.length > 0;
+}
 
-  const nomes = new Set<string>();
-  for (const page of json.results) {
-    for (const opt of page.properties["Condominios"]?.multi_select ?? []) {
-      nomes.add(opt.name);
-    }
+// Cria a página da síndica na base "Síndicas" a partir do autocadastro pelo
+// próprio bot (ver garantirCadastro). O nome da propriedade título varia por
+// base — busca no schema em vez de hardcodar, mesmo padrão de
+// buscarSchemaCondominio.
+async function cadastrarSindica(chatId: number, nome: string): Promise<void> {
+  const schema = (await notionFetch(`databases/${SINDICAS_DB_ID}`)) as {
+    properties: Record<string, { type: string }>;
+  };
+  const tituloProp = Object.entries(schema.properties).find(([, v]) => v.type === "title")?.[0];
+  if (!tituloProp) {
+    throw new Error("Não encontrei a propriedade de título na base Síndicas.");
   }
-  return [...nomes];
+
+  await notionFetch("pages", {
+    method: "POST",
+    body: JSON.stringify({
+      parent: { database_id: SINDICAS_DB_ID },
+      properties: {
+        [tituloProp]: { title: [{ text: { content: nome } }] },
+        "Telegram Chat ID": { rich_text: [{ text: { content: String(chatId) } }] },
+        Ativo: { checkbox: true },
+      },
+    }),
+  });
+}
+
+type SessaoCadastro = { fluxo: "cadastro"; step: "nome" };
+
+// Ponto único de autorização de todo o bot: quando o chat ainda não está
+// cadastrado, em vez de só recusar, pergunta o nome e se autocadastra assim
+// que a pessoa responde — evita depender de alguém pedir o chat_id e
+// cadastrar manualmente no Notion antes dela conseguir usar o bot. Retorna
+// true = pode seguir com o processamento normal desta mensagem; false = já
+// respondeu (pediu o nome, cadastrou, ou pediu pra reenviar como texto) e o
+// chamador deve parar por aqui.
+async function garantirCadastro(chatId: number, texto: string | null): Promise<boolean> {
+  if (await estaAutorizada(chatId)) return true;
+
+  const linhaSessao = await buscarLinhaSessao(chatId);
+  const emCadastro = linhaSessao?.sessao?.fluxo === "cadastro";
+  const nome = texto?.trim();
+
+  if (emCadastro && nome && !nome.startsWith("/")) {
+    await cadastrarSindica(chatId, nome);
+    await limparSessao(chatId);
+    await responderTelegram(chatId, `Prontinho, ${nome}! Você já pode usar o bot.`, MENU_PRINCIPAL);
+    return false;
+  }
+
+  if (emCadastro) {
+    await responderTelegram(
+      chatId,
+      "Pra concluir o cadastro, me manda seu nome numa mensagem de texto.",
+    );
+    return false;
+  }
+
+  await salvarSessao(chatId, { fluxo: "cadastro", step: "nome" });
+  await responderTelegram(chatId, "Olá! Ainda não tenho seu cadastro por aqui. Qual é o seu nome?");
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +487,8 @@ type Sessao =
   | SessaoAtualizarTarefa
   | SessaoNovaPendente
   | SessaoAtualizarPendente
-  | SessaoIndefinidaPendente;
+  | SessaoIndefinidaPendente
+  | SessaoCadastro;
 
 async function buscarLinhaSessao(
   chatId: number,
@@ -1161,14 +1225,7 @@ async function processarAudioAtualizar(
 }
 
 async function tratarAudioTarefa(chatId: number, fileId: string): Promise<void> {
-  const autorizada = (await condominiosDaSindica(chatId)).length > 0;
-  if (!autorizada) {
-    await responderTelegram(
-      chatId,
-      "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
-    );
-    return;
-  }
+  if (!(await garantirCadastro(chatId, null))) return;
 
   if (!groqConfigurado()) {
     await responderTelegram(
@@ -1638,14 +1695,7 @@ async function iniciarEscolhaCondominio(
   chatId: number,
   fluxo: "nova" | "atualizar",
 ): Promise<void> {
-  const autorizada = (await condominiosDaSindica(chatId)).length > 0;
-  if (!autorizada) {
-    await responderTelegram(
-      chatId,
-      "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
-    );
-    return;
-  }
+  if (!(await garantirCadastro(chatId, null))) return;
   const chaves = Object.keys(CONDOMINIOS).sort((a, b) =>
     NOMES_CONDOMINIOS[a].localeCompare(NOMES_CONDOMINIOS[b], "pt-BR"),
   );
@@ -1928,14 +1978,7 @@ async function tratarCallbackQuery(callbackQuery: {
 // ---------------------------------------------------------------------------
 
 async function tratarMensagem(chatId: number, texto: string): Promise<void> {
-  const autorizada = (await condominiosDaSindica(chatId)).length > 0;
-  if (!autorizada) {
-    await responderTelegram(
-      chatId,
-      "Você não está cadastrada como síndica ativa. Fale com a equipe pra ser adicionada.",
-    );
-    return;
-  }
+  if (!(await garantirCadastro(chatId, texto))) return;
 
   // Atalho camada 1 — comando de uma linha só, sem passar pelo fluxo de botões.
   if (texto.includes("|")) {
