@@ -4,12 +4,12 @@
 // protótipo que foi validado manualmente no n8n (MVP Equipe Síndicas) —
 // mesma lógica, sem precisar manter um servidor n8n rodando.
 //
-// Roteamento: a database Notion "Síndicas" mapeia cada síndica (nome +
-// Telegram Chat ID) para os condomínios que ela atende (multi_select,
-// suporta N:N — uma síndica pode cobrir vários condomínios, e vice-versa).
-// Consultada ao vivo a cada execução (é 1 chamada extra, sem custo real) —
-// editar uma linha lá já vale na próxima execução, sem passo de "salvar".
-// Condomínio sem nenhuma síndica ativa mapeada: não envia, só registra erro.
+// Roteamento: a database Notion "Alertas" (cadastro manual) liga uma pessoa
+// já cadastrada na base "Telegram" (relation "Pessoa", de onde vem o
+// Telegram Chat ID) aos condomínios que ela recebe (multi_select, suporta
+// N:N). Consultada ao vivo a cada execução — editar uma linha lá já vale na
+// próxima execução. Pessoa removida de "Telegram" deixa de receber. Condomínio
+// sem ninguém mapeado: não envia, só registra erro.
 //
 // Deduplicação: cada tarefa alertada vira uma página na database "Alertas
 // Enviados" (Notion), indexada pelo Task Page ID da tarefa original. Antes
@@ -24,7 +24,7 @@ const NOTION_VERSION = "2022-06-28";
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALERTAS_ENVIADOS_DB_ID = "3d9e69ba114f81c0b568eabc3e254819";
-const SINDICAS_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
+const ALERTAS_DB_ID = "f1d613aa3a9a4218b9917bf6d24118c5";
 
 if (!NOTION_API_KEY || !TELEGRAM_BOT_TOKEN) {
   console.error(
@@ -126,29 +126,37 @@ async function buscarPageIdsJaAlertados() {
   return idsAlertados;
 }
 
-// Monta um Map condominio -> [chatId, ...] a partir das síndicas ativas.
-// Uma síndica pode aparecer em vários condomínios (multi_select) e um
-// condomínio pode ter várias síndicas — cada uma recebe o alerta.
+// Monta um Map condominio -> [chatId, ...] a partir da base "Alertas"
+// (cadastro manual). Cada linha aponta (relation "Pessoa") pra uma pessoa da
+// base "Telegram", de onde vem o chat_id; se a pessoa foi removida de
+// "Telegram", a relação fica vazia e ela deixa de receber alertas.
 async function buscarMapaSindicas() {
   const mapa = new Map();
+  const chatIdPorPessoa = new Map();
   let cursor;
   do {
     const body = {
-      filter: { property: "Ativo", checkbox: { equals: true } },
       page_size: 100,
       ...(cursor ? { start_cursor: cursor } : {}),
     };
-    const json = await notionFetch(`databases/${SINDICAS_DB_ID}/query`, {
+    const json = await notionFetch(`databases/${ALERTAS_DB_ID}/query`, {
       method: "POST",
       body: JSON.stringify(body),
     });
     for (const page of json.results) {
-      const chatId = page.properties["Telegram Chat ID"]?.rich_text?.[0]?.plain_text?.trim();
       const condominios = page.properties["Condominios"]?.multi_select ?? [];
-      if (!chatId) continue;
-      for (const { name } of condominios) {
-        if (!mapa.has(name)) mapa.set(name, new Set());
-        mapa.get(name).add(chatId);
+      for (const { id: pessoaId } of page.properties["Pessoa"]?.relation ?? []) {
+        if (!chatIdPorPessoa.has(pessoaId)) {
+          const pessoa = await notionFetch(`pages/${pessoaId}`);
+          const chatId = pessoa.properties["Telegram Chat ID"]?.rich_text?.[0]?.plain_text?.trim();
+          chatIdPorPessoa.set(pessoaId, chatId || null);
+        }
+        const chatId = chatIdPorPessoa.get(pessoaId);
+        if (!chatId) continue;
+        for (const { name } of condominios) {
+          if (!mapa.has(name)) mapa.set(name, new Set());
+          mapa.get(name).add(chatId);
+        }
       }
     }
     cursor = json.has_more ? json.next_cursor : null;
@@ -177,7 +185,8 @@ async function enviarTelegram(chatId, texto) {
     body: JSON.stringify({ chat_id: chatId, text: texto }),
   });
   const json = await res.json();
-  if (!json.ok) throw new Error(`Telegram API (chat_id ${chatId}): ${json.description || res.statusText}`);
+  if (!json.ok)
+    throw new Error(`Telegram API (chat_id ${chatId}): ${json.description || res.statusText}`);
 }
 
 function montarMensagem({ tarefa, condominio, prazo, link }) {
@@ -241,7 +250,7 @@ async function main() {
 
       const chatIds = [...(mapaSindicas.get(nome) ?? [])];
       if (chatIds.length === 0) {
-        erros.push(`${nome} — ${dados.tarefa}: nenhuma síndica ativa mapeada, alerta não enviado`);
+        erros.push(`${nome} — ${dados.tarefa}: ninguém mapeado em Alertas, alerta não enviado`);
         continue;
       }
 

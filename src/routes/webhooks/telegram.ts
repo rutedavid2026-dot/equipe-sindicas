@@ -25,15 +25,13 @@ import { isFechada, normalizeForMatch } from "@/lib/report-utils";
 // Camada 1 (comando único, ainda funciona): /novatarefa Condomínio | Tarefa
 // | Dias — atalho pra quem já sabe o formato, sem passar pelos botões.
 //
-// Autorização: cada chat_id precisa estar cadastrado como síndica ativa na
-// database "Síndicas" (mesma usada pela automação de alertas em
-// scripts/alertar-tarefas-atrasadas.mjs) — mas isso agora acontece por
-// autocadastro (ver garantirCadastro): quem manda qualquer mensagem sem
-// estar cadastrada é perguntada o nome, e assim que responde já vira uma
-// linha ativa na base e fica liberada dali em diante, sem precisar que
-// alguém descubra o chat_id dela e cadastre manualmente antes. Não há mais
-// nenhum controle de quem pode se autocadastrar — qualquer pessoa que
-// descobrir o @equipesindicas_bot e mandar mensagem ganha acesso.
+// Autorização: cada chat_id precisa ter uma linha na database "Telegram" —
+// criada por autocadastro (ver garantirCadastro): quem manda qualquer
+// mensagem sem estar cadastrada é perguntada o nome, e assim que responde
+// já fica liberada dali em diante. Não há controle de quem pode se
+// autocadastrar — qualquer pessoa que descobrir o @equipesindicas_bot e
+// mandar mensagem ganha acesso; pra revogar, exclui-se a linha. Quem recebe
+// alerta de atraso é outro cadastro (base "Alertas", manual).
 //
 // Setup necessário (variáveis de ambiente nesta implantação):
 //   TELEGRAM_BOT_TOKEN_ALERTAS — token do bot @equipesindicas_bot
@@ -45,7 +43,7 @@ import { isFechada, normalizeForMatch } from "@/lib/report-utils";
 //   curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN_ALERTAS/setWebhook?url=https://SEU_DOMINIO/webhooks/telegram"
 
 const NOTION_VERSION = "2022-06-28";
-const SINDICAS_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
+const TELEGRAM_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
 const SESSOES_DB_ID = "3dae69ba114f8170aea1c56a019ed184";
 
 // Mesma lista de scripts/alertar-tarefas-atrasadas.mjs — duplicada de
@@ -209,48 +207,40 @@ async function mostrarMenuInicial(chatId: number): Promise<void> {
   await responderTelegram(chatId, "O que você quer fazer?", MENU_PRINCIPAL);
 }
 
-// Verifica se o chat já está cadastrado como síndica ativa na base
-// "Síndicas" — não depende do campo "Condominios" estar preenchido (esse
-// campo hoje só serve pro roteamento do alerta semanal, ver
-// scripts/alertar-tarefas-atrasadas.mjs; o seletor de condomínio deste bot
-// sempre lista todos, então uma síndica autocadastrada sem nenhum
-// condomínio marcado ainda pode usar o bot normalmente).
+// Verifica se o chat está cadastrado na base "Telegram" — estar lá é a
+// autorização; pra remover o acesso, basta excluir a linha. Alertas de tarefa
+// atrasada ficam numa base separada ("Alertas", manual, ver
+// scripts/alertar-tarefas-atrasadas.mjs).
 async function estaAutorizada(chatId: number): Promise<boolean> {
-  const json = (await notionFetch(`databases/${SINDICAS_DB_ID}/query`, {
+  const json = (await notionFetch(`databases/${TELEGRAM_DB_ID}/query`, {
     method: "POST",
     body: JSON.stringify({
-      filter: {
-        and: [
-          { property: "Ativo", checkbox: { equals: true } },
-          { property: "Telegram Chat ID", rich_text: { equals: String(chatId) } },
-        ],
-      },
+      filter: { property: "Telegram Chat ID", rich_text: { equals: String(chatId) } },
     }),
   })) as { results: unknown[] };
   return json.results.length > 0;
 }
 
-// Cria a página da síndica na base "Síndicas" a partir do autocadastro pelo
+// Cria a página da pessoa na base "Telegram" a partir do autocadastro pelo
 // próprio bot (ver garantirCadastro). O nome da propriedade título varia por
 // base — busca no schema em vez de hardcodar, mesmo padrão de
 // buscarSchemaCondominio.
 async function cadastrarSindica(chatId: number, nome: string): Promise<void> {
-  const schema = (await notionFetch(`databases/${SINDICAS_DB_ID}`)) as {
+  const schema = (await notionFetch(`databases/${TELEGRAM_DB_ID}`)) as {
     properties: Record<string, { type: string }>;
   };
   const tituloProp = Object.entries(schema.properties).find(([, v]) => v.type === "title")?.[0];
   if (!tituloProp) {
-    throw new Error("Não encontrei a propriedade de título na base Síndicas.");
+    throw new Error("Não encontrei a propriedade de título na base Telegram.");
   }
 
   await notionFetch("pages", {
     method: "POST",
     body: JSON.stringify({
-      parent: { database_id: SINDICAS_DB_ID },
+      parent: { database_id: TELEGRAM_DB_ID },
       properties: {
         [tituloProp]: { title: [{ text: { content: nome } }] },
         "Telegram Chat ID": { rich_text: [{ text: { content: String(chatId) } }] },
-        Ativo: { checkbox: true },
       },
     }),
   });
