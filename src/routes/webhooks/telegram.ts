@@ -171,6 +171,7 @@ const MENU_PRINCIPAL = {
   inline_keyboard: [
     [{ text: "🆕 Nova Tarefa", callback_data: "novatarefa" }],
     [{ text: "🔄 Atualizar Tarefa", callback_data: "atualizartarefa" }],
+    [{ text: "⚙️ Configurar Alertas", callback_data: "configuraralertas" }],
   ],
 };
 
@@ -192,6 +193,29 @@ async function responderTelegram(
   });
 }
 
+// Edita uma mensagem já enviada em vez de mandar uma nova — usado na tela de
+// "Configurar Alertas" pra simular um checklist de múltipla escolha (o
+// Telegram não tem esse componente nativo): cada toque marca/desmarca
+// ✅/⬜ no próprio botão e a tela é reescrita no lugar, sem empilhar mensagem
+// nova a cada clique.
+async function editarMensagem(
+  chatId: number,
+  messageId: number,
+  texto: string,
+  replyMarkup?: ReplyMarkup,
+): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${telegramToken()}/editMessageText`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text: texto,
+      reply_markup: replyMarkup ?? MENU_VOLTAR,
+    }),
+  });
+}
+
 // Tira o "carregando..." do botão no app do Telegram — não afeta a lógica,
 // só a experiência de quem clicou (sem isso o botão fica "pensando" até dar
 // timeout no cliente).
@@ -207,7 +231,8 @@ const TEXTO_MENU =
   "O que você quer fazer?\n\n" +
   "👇 Toque em um botão:\n" +
   "🆕 Nova Tarefa — cadastra uma tarefa em um condomínio\n" +
-  "🔄 Atualizar Tarefa — muda o status e registra a última atualização de uma tarefa\n\n" +
+  "🔄 Atualizar Tarefa — muda o status e registra a última atualização de uma tarefa\n" +
+  "⚙️ Configurar Alertas — escolhe se e de quais condomínios/tarefas você quer ser avisada quando algo atrasar\n\n" +
   "🎙️ Ou, mais rápido, grave um áudio dizendo:\n" +
   "• Nova: o condomínio, a tarefa, o prazo e, se quiser, responsável, prioridade e setor. " +
   'Ex.: "No Miragio, trocar lâmpada do salão de festas, prazo 7 dias, prioridade alta".\n' +
@@ -299,6 +324,235 @@ async function garantirCadastro(chatId: number, texto: string | null): Promise<b
     "Olá! Sou o bot da Equipe Síndicas: crio e atualizo tarefas dos condomínios direto por aqui.\n\nAntes de começar, preciso te cadastrar. Qual é o seu nome? (responda em uma mensagem de texto)",
   );
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Configurar Alertas — preferências de quem recebe alerta de tarefa atrasada
+// (script separado, scripts/alertar-tarefas-atrasadas.mjs), tudo configurado
+// pelo próprio bot, sem editar o Notion à mão. Uma pessoa recebe o alerta de
+// uma tarefa atrasada se "Alertas Ativos" estiver marcado E (o condomínio da
+// tarefa estiver em "Condominios" OU a tarefa específica estiver em "Tarefas
+// Acompanhadas").
+//
+// "Tarefas Acompanhadas" fica em texto (JSON), não como relation do Notion:
+// uma relation só aponta pra UMA database, e as tarefas ficam espalhadas em
+// 29 databases de condomínio diferentes — não dá pra relacionar com todas ao
+// mesmo tempo. Mesmo padrão já usado pelo Estado da sessão (Sessões DB).
+// ---------------------------------------------------------------------------
+
+type TarefaSeguida = { condominio: string; pageId: string; titulo: string };
+
+type PessoaTelegram = {
+  pageId: string;
+  alertasAtivos: boolean;
+  condominiosMonitorados: Set<string>;
+  tarefasAcompanhadas: TarefaSeguida[];
+};
+
+async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | null> {
+  const json = (await notionFetch(`databases/${TELEGRAM_DB_ID}/query`, {
+    method: "POST",
+    body: JSON.stringify({
+      filter: { property: "Telegram Chat ID", rich_text: { equals: String(chatId) } },
+    }),
+  })) as {
+    results: {
+      id: string;
+      properties: Record<
+        string,
+        {
+          checkbox?: boolean;
+          multi_select?: { name: string }[];
+          rich_text?: { plain_text: string }[];
+        }
+      >;
+    }[];
+  };
+
+  const page = json.results[0];
+  if (!page) return null;
+
+  const tarefasTexto = (page.properties["Tarefas Acompanhadas"]?.rich_text ?? [])
+    .map((t) => t.plain_text)
+    .join("");
+  let tarefasAcompanhadas: TarefaSeguida[] = [];
+  if (tarefasTexto) {
+    try {
+      tarefasAcompanhadas = JSON.parse(tarefasTexto) as TarefaSeguida[];
+    } catch {
+      tarefasAcompanhadas = [];
+    }
+  }
+
+  return {
+    pageId: page.id,
+    alertasAtivos: page.properties["Alertas Ativos"]?.checkbox === true,
+    condominiosMonitorados: new Set(
+      (page.properties["Condominios"]?.multi_select ?? []).map((o) => o.name),
+    ),
+    tarefasAcompanhadas,
+  };
+}
+
+// Notion limita cada bloco de rich_text a 2000 caracteres — divide em vários
+// blocos em vez de truncar, já que a lista de tarefas seguidas pode crescer.
+function paraBlocosRichText(texto: string): { text: { content: string } }[] {
+  const TAMANHO = 1900;
+  const blocos: { text: { content: string } }[] = [];
+  for (let i = 0; i < texto.length; i += TAMANHO) {
+    blocos.push({ text: { content: texto.slice(i, i + TAMANHO) } });
+  }
+  return blocos.length > 0 ? blocos : [{ text: { content: "" } }];
+}
+
+async function salvarConfigAlertas(
+  pageId: string,
+  patch: {
+    alertasAtivos?: boolean;
+    condominiosMonitorados?: Set<string>;
+    tarefasAcompanhadas?: TarefaSeguida[];
+  },
+): Promise<void> {
+  const properties: Record<string, unknown> = {};
+  if (patch.alertasAtivos !== undefined) {
+    properties["Alertas Ativos"] = { checkbox: patch.alertasAtivos };
+  }
+  if (patch.condominiosMonitorados) {
+    properties["Condominios"] = {
+      multi_select: [...patch.condominiosMonitorados].map((name) => ({ name })),
+    };
+  }
+  if (patch.tarefasAcompanhadas) {
+    properties["Tarefas Acompanhadas"] = {
+      rich_text: paraBlocosRichText(JSON.stringify(patch.tarefasAcompanhadas)),
+    };
+  }
+  await notionFetch(`pages/${pageId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ properties }),
+  });
+}
+
+function chavesCondominiosOrdenadas(): string[] {
+  return Object.keys(CONDOMINIOS).sort((a, b) =>
+    NOMES_CONDOMINIOS[a].localeCompare(NOMES_CONDOMINIOS[b], "pt-BR"),
+  );
+}
+
+function textoMenuAlertas(pessoa: PessoaTelegram): string {
+  const geral = pessoa.alertasAtivos ? "🔔 Ativado" : "🔕 Desativado";
+  return (
+    "⚙️ Configurar Alertas de Tarefas Atrasadas\n\n" +
+    `Status geral: ${geral}\n` +
+    `🏢 Condomínios monitorados: ${pessoa.condominiosMonitorados.size}\n` +
+    `🎯 Tarefas específicas seguidas: ${pessoa.tarefasAcompanhadas.length}\n\n` +
+    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio)."
+  );
+}
+
+function tecladoMenuAlertas(pessoa: PessoaTelegram): ReplyMarkup {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: pessoa.alertasAtivos ? "🔕 Desativar alertas" : "🔔 Ativar alertas",
+          callback_data: "alertageral",
+        },
+      ],
+      [{ text: "🏢 Condomínios monitorados", callback_data: "alertacondos" }],
+      [{ text: "🎯 Tarefas específicas", callback_data: "alertatarefas" }],
+      [BOTAO_VOLTAR],
+    ],
+  };
+}
+
+async function mostrarMenuAlertas(chatId: number, messageId?: number): Promise<void> {
+  const pessoa = await buscarPessoaTelegram(chatId);
+  if (!pessoa) return;
+  await salvarSessao(chatId, { fluxo: "config_alertas", step: "menu" });
+  const texto = textoMenuAlertas(pessoa);
+  const teclado = tecladoMenuAlertas(pessoa);
+  if (messageId) await editarMensagem(chatId, messageId, texto, teclado);
+  else await responderTelegram(chatId, texto, teclado);
+}
+
+const TEXTO_CHECKLIST_CONDOMINIOS =
+  "🏢 Toque para ativar/desativar o alerta de cada condomínio — você recebe TODAS as tarefas atrasadas dos marcados com ✅.";
+
+function tecladoChecklistCondominios(monitorados: Set<string>): ReplyMarkup {
+  const chaves = chavesCondominiosOrdenadas();
+  return {
+    inline_keyboard: [
+      ...chaves.map((chave) => {
+        const nome = NOMES_CONDOMINIOS[chave];
+        const marcado = monitorados.has(nome);
+        return [
+          { text: `${marcado ? "✅" : "⬜"} ${nome}`, callback_data: `alertacondo:${chave}` },
+        ];
+      }),
+      [{ text: "💾 Salvar e voltar", callback_data: "alertasvoltar" }],
+    ],
+  };
+}
+
+async function mostrarChecklistCondominios(chatId: number, messageId: number): Promise<void> {
+  const pessoa = await buscarPessoaTelegram(chatId);
+  if (!pessoa) return;
+  await editarMensagem(
+    chatId,
+    messageId,
+    TEXTO_CHECKLIST_CONDOMINIOS,
+    tecladoChecklistCondominios(pessoa.condominiosMonitorados),
+  );
+}
+
+async function mostrarEscolhaCondominioAlertas(chatId: number, messageId: number): Promise<void> {
+  const chaves = chavesCondominiosOrdenadas();
+  await editarMensagem(
+    chatId,
+    messageId,
+    "🎯 De qual condomínio você quer seguir tarefas específicas? Toque para escolher.",
+    {
+      inline_keyboard: [
+        ...chaves.map((chave) => [
+          { text: NOMES_CONDOMINIOS[chave], callback_data: `alertatarefacondo:${chave}` },
+        ]),
+        [{ text: "🔙 Voltar", callback_data: "alertasvoltar" }],
+      ],
+    },
+  );
+}
+
+async function mostrarChecklistTarefas(
+  chatId: number,
+  messageId: number,
+  chave: string,
+): Promise<void> {
+  const pessoa = await buscarPessoaTelegram(chatId);
+  const databaseId = CONDOMINIOS[chave];
+  if (!pessoa || !databaseId) return;
+  const nome = NOMES_CONDOMINIOS[chave];
+  const tarefas = await buscarTarefasAbertas(databaseId);
+  const seguidas = new Set(
+    pessoa.tarefasAcompanhadas.filter((t) => t.condominio === nome).map((t) => t.pageId),
+  );
+  await editarMensagem(
+    chatId,
+    messageId,
+    `🎯 ${nome} — toque para seguir/deixar de seguir uma tarefa específica (independente dos condomínios monitorados).`,
+    {
+      inline_keyboard: [
+        ...tarefas.map((t) => [
+          {
+            text: `${seguidas.has(t.id) ? "✅" : "⬜"} ${truncar(t.titulo, 50)}`,
+            callback_data: `alertatarefa:${t.id}`,
+          },
+        ]),
+        [{ text: "🏢 Trocar condomínio", callback_data: "alertatarefas" }],
+        [{ text: "💾 Salvar e voltar", callback_data: "alertasvoltar" }],
+      ],
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -491,13 +745,23 @@ type SessaoIndefinidaPendente = {
   textoAtualizacao?: string;
 };
 
+// Estado da tela de "Configurar Alertas" (ver ⚙️ no menu principal) —
+// condominioChave só é usado no passo "tarefas_condo", pra lembrar de qual
+// condomínio veio a lista de tarefas sendo marcada/desmarcada.
+type SessaoConfigAlertas = {
+  fluxo: "config_alertas";
+  step: "menu" | "condominios" | "tarefas" | "tarefas_condo";
+  condominioChave?: string;
+};
+
 type Sessao =
   | SessaoNovaTarefa
   | SessaoAtualizarTarefa
   | SessaoNovaPendente
   | SessaoAtualizarPendente
   | SessaoIndefinidaPendente
-  | SessaoCadastro;
+  | SessaoCadastro
+  | SessaoConfigAlertas;
 
 async function buscarLinhaSessao(
   chatId: number,
@@ -1736,10 +2000,11 @@ async function iniciarEscolhaCondominio(
 async function tratarCallbackQuery(callbackQuery: {
   id: string;
   data?: string;
-  message?: { chat?: { id?: number } };
+  message?: { chat?: { id?: number }; message_id?: number };
 }): Promise<void> {
   await responderCallback(callbackQuery.id);
   const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
   const data = callbackQuery.data;
   if (!chatId || !data) return;
 
@@ -1751,6 +2016,97 @@ async function tratarCallbackQuery(callbackQuery: {
 
   if (data === "novatarefa") {
     await iniciarEscolhaCondominio(chatId, "nova");
+    return;
+  }
+
+  if (data === "configuraralertas") {
+    if (!(await garantirCadastro(chatId, null))) return;
+    await mostrarMenuAlertas(chatId, messageId);
+    return;
+  }
+
+  if (data === "alertageral" && messageId) {
+    const pessoa = await buscarPessoaTelegram(chatId);
+    if (!pessoa) return;
+    await salvarConfigAlertas(pessoa.pageId, { alertasAtivos: !pessoa.alertasAtivos });
+    await mostrarMenuAlertas(chatId, messageId);
+    return;
+  }
+
+  if (data === "alertacondos" && messageId) {
+    await salvarSessao(chatId, { fluxo: "config_alertas", step: "condominios" });
+    await mostrarChecklistCondominios(chatId, messageId);
+    return;
+  }
+
+  if (data.startsWith("alertacondo:") && messageId) {
+    const chave = data.slice("alertacondo:".length);
+    const nomeCondo = NOMES_CONDOMINIOS[chave];
+    const pessoa = await buscarPessoaTelegram(chatId);
+    if (!nomeCondo || !pessoa) return;
+    const novoSet = new Set(pessoa.condominiosMonitorados);
+    if (novoSet.has(nomeCondo)) novoSet.delete(nomeCondo);
+    else novoSet.add(nomeCondo);
+    await salvarConfigAlertas(pessoa.pageId, { condominiosMonitorados: novoSet });
+    await editarMensagem(
+      chatId,
+      messageId,
+      TEXTO_CHECKLIST_CONDOMINIOS,
+      tecladoChecklistCondominios(novoSet),
+    );
+    return;
+  }
+
+  if (data === "alertatarefas" && messageId) {
+    await salvarSessao(chatId, { fluxo: "config_alertas", step: "tarefas" });
+    await mostrarEscolhaCondominioAlertas(chatId, messageId);
+    return;
+  }
+
+  if (data.startsWith("alertatarefacondo:") && messageId) {
+    const chave = data.slice("alertatarefacondo:".length);
+    if (!CONDOMINIOS[chave]) return;
+    await salvarSessao(chatId, {
+      fluxo: "config_alertas",
+      step: "tarefas_condo",
+      condominioChave: chave,
+    });
+    await mostrarChecklistTarefas(chatId, messageId, chave);
+    return;
+  }
+
+  if (data.startsWith("alertatarefa:") && messageId) {
+    const pageId = data.slice("alertatarefa:".length);
+    const linhaAtual = await buscarLinhaSessao(chatId);
+    const chave =
+      linhaAtual?.sessao?.fluxo === "config_alertas"
+        ? linhaAtual.sessao.condominioChave
+        : undefined;
+    const databaseId = chave ? CONDOMINIOS[chave] : undefined;
+    const pessoa = chave ? await buscarPessoaTelegram(chatId) : null;
+    if (!chave || !databaseId || !pessoa) return;
+    const nomeCondo = NOMES_CONDOMINIOS[chave];
+
+    const jaSegue = pessoa.tarefasAcompanhadas.some((t) => t.pageId === pageId);
+    let novaLista: TarefaSeguida[];
+    if (jaSegue) {
+      novaLista = pessoa.tarefasAcompanhadas.filter((t) => t.pageId !== pageId);
+    } else {
+      const tarefas = await buscarTarefasAbertas(databaseId);
+      const tarefa = tarefas.find((t) => t.id === pageId);
+      if (!tarefa) return;
+      novaLista = [
+        ...pessoa.tarefasAcompanhadas,
+        { condominio: nomeCondo, pageId, titulo: truncar(tarefa.titulo, 60) },
+      ];
+    }
+    await salvarConfigAlertas(pessoa.pageId, { tarefasAcompanhadas: novaLista });
+    await mostrarChecklistTarefas(chatId, messageId, chave);
+    return;
+  }
+
+  if (data === "alertasvoltar" && messageId) {
+    await mostrarMenuAlertas(chatId, messageId);
     return;
   }
 
@@ -2116,7 +2472,11 @@ export const Route = createFileRoute("/webhooks/telegram")({
 
         try {
           const callbackQuery = update.callback_query as
-            | { id: string; data?: string; message?: { chat?: { id?: number } } }
+            | {
+                id: string;
+                data?: string;
+                message?: { chat?: { id?: number }; message_id?: number };
+              }
             | undefined;
           if (callbackQuery) {
             await tratarCallbackQuery(callbackQuery);

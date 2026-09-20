@@ -4,12 +4,17 @@
 // protótipo que foi validado manualmente no n8n (MVP Equipe Síndicas) —
 // mesma lógica, sem precisar manter um servidor n8n rodando.
 //
-// Roteamento: a database Notion "Alertas" (cadastro manual) liga uma pessoa
-// já cadastrada na base "Telegram" (relation "Pessoa", de onde vem o
-// Telegram Chat ID) aos condomínios que ela recebe (multi_select, suporta
-// N:N). Consultada ao vivo a cada execução — editar uma linha lá já vale na
-// próxima execução. Pessoa removida de "Telegram" deixa de receber. Condomínio
-// sem ninguém mapeado: não envia, só registra erro.
+// Roteamento: tudo fica numa base só, "Telegram" — quem usa o bot também
+// configura ali (pelo próprio bot, não à mão) se quer receber alerta de
+// atraso, de quais condomínios inteiros (multi_select "Condominios") e de
+// quais tarefas específicas mesmo fora desses condomínios ("Tarefas
+// Acompanhadas", JSON em texto — motivo: uma relation do Notion só aponta
+// pra uma database, e as tarefas vivem espalhadas em 29 databases
+// diferentes, então não dá pra "relacionar" com todas ao mesmo tempo).
+// Consultada ao vivo a cada execução. Uma pessoa recebe o alerta de uma
+// tarefa atrasada se "Alertas Ativos" estiver marcado e (o condomínio da
+// tarefa está em "Condominios" OU a tarefa está em "Tarefas Acompanhadas").
+// Condomínio/tarefa sem ninguém elegível: não envia, só registra erro.
 //
 // Deduplicação: cada tarefa alertada vira uma página na database "Alertas
 // Enviados" (Notion), indexada pelo Task Page ID da tarefa original. Antes
@@ -24,7 +29,7 @@ const NOTION_VERSION = "2022-06-28";
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALERTAS_ENVIADOS_DB_ID = "3d9e69ba114f81c0b568eabc3e254819";
-const ALERTAS_DB_ID = "f1d613aa3a9a4218b9917bf6d24118c5";
+const TELEGRAM_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
 
 if (!NOTION_API_KEY || !TELEGRAM_BOT_TOKEN) {
   console.error(
@@ -126,42 +131,47 @@ async function buscarPageIdsJaAlertados() {
   return idsAlertados;
 }
 
-// Monta um Map condominio -> [chatId, ...] a partir da base "Alertas"
-// (cadastro manual). Cada linha aponta (relation "Pessoa") pra uma pessoa da
-// base "Telegram", de onde vem o chat_id; se a pessoa foi removida de
-// "Telegram", a relação fica vazia e ela deixa de receber alertas.
-async function buscarMapaSindicas() {
-  const mapa = new Map();
-  const chatIdPorPessoa = new Map();
+// Lê a base "Telegram" uma vez e devolve só quem tem "Alertas Ativos"
+// marcado, já com os condomínios monitorados e as tarefas específicas
+// seguidas (por Page ID — IDs de página do Notion são únicos no workspace
+// inteiro, então não precisa nem saber de qual condomínio veio pra comparar).
+async function buscarPessoasComAlerta() {
+  const pessoas = [];
   let cursor;
   do {
-    const body = {
-      page_size: 100,
-      ...(cursor ? { start_cursor: cursor } : {}),
-    };
-    const json = await notionFetch(`databases/${ALERTAS_DB_ID}/query`, {
+    const body = { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) };
+    const json = await notionFetch(`databases/${TELEGRAM_DB_ID}/query`, {
       method: "POST",
       body: JSON.stringify(body),
     });
     for (const page of json.results) {
-      const condominios = page.properties["Condominios"]?.multi_select ?? [];
-      for (const { id: pessoaId } of page.properties["Pessoa"]?.relation ?? []) {
-        if (!chatIdPorPessoa.has(pessoaId)) {
-          const pessoa = await notionFetch(`pages/${pessoaId}`);
-          const chatId = pessoa.properties["Telegram Chat ID"]?.rich_text?.[0]?.plain_text?.trim();
-          chatIdPorPessoa.set(pessoaId, chatId || null);
-        }
-        const chatId = chatIdPorPessoa.get(pessoaId);
-        if (!chatId) continue;
-        for (const { name } of condominios) {
-          if (!mapa.has(name)) mapa.set(name, new Set());
-          mapa.get(name).add(chatId);
+      const chatId = page.properties["Telegram Chat ID"]?.rich_text?.[0]?.plain_text?.trim();
+      const alertasAtivos = page.properties["Alertas Ativos"]?.checkbox === true;
+      if (!chatId || !alertasAtivos) continue;
+
+      const condominios = new Set(
+        (page.properties["Condominios"]?.multi_select ?? []).map((o) => o.name),
+      );
+      const tarefasTexto = (page.properties["Tarefas Acompanhadas"]?.rich_text ?? [])
+        .map((t) => t.plain_text)
+        .join("");
+      let tarefasSeguidas = [];
+      if (tarefasTexto) {
+        try {
+          tarefasSeguidas = JSON.parse(tarefasTexto);
+        } catch {
+          tarefasSeguidas = [];
         }
       }
+      pessoas.push({
+        chatId,
+        condominios,
+        tarefas: new Set(tarefasSeguidas.map((t) => t.pageId)),
+      });
     }
     cursor = json.has_more ? json.next_cursor : null;
   } while (cursor);
-  return mapa;
+  return pessoas;
 }
 
 function nomeDaTarefa(page) {
@@ -217,9 +227,9 @@ async function registrarAlerta({ tarefa, condominio, pageId, chatIds }) {
 }
 
 async function main() {
-  console.log("Buscando mapeamento de síndicas...");
-  const mapaSindicas = await buscarMapaSindicas();
-  console.log(`${mapaSindicas.size} condomínio(s) com síndica ativa mapeada.`);
+  console.log("Buscando quem tem alerta ativo na base Telegram...");
+  const pessoas = await buscarPessoasComAlerta();
+  console.log(`${pessoas.length} pessoa(s) com alertas ativos.`);
 
   console.log("Buscando tarefas já alertadas (deduplicação)...");
   const jaAlertados = await buscarPageIdsJaAlertados();
@@ -248,9 +258,13 @@ async function main() {
         pageId: page.id,
       };
 
-      const chatIds = [...(mapaSindicas.get(nome) ?? [])];
+      const chatIds = pessoas
+        .filter((p) => p.condominios.has(nome) || p.tarefas.has(page.id))
+        .map((p) => p.chatId);
       if (chatIds.length === 0) {
-        erros.push(`${nome} — ${dados.tarefa}: ninguém mapeado em Alertas, alerta não enviado`);
+        erros.push(
+          `${nome} — ${dados.tarefa}: ninguém elegível na base Telegram, alerta não enviado`,
+        );
         continue;
       }
 
