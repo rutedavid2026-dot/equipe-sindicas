@@ -326,44 +326,66 @@ function RelatorioGeralPage() {
           <>
             <KpiCards {...kpis} variant="gerencial" />
 
-            <Charts rows={filtered} porCondominio={isTodosCondominios} />
+            <nav className="bg-background/95 sticky top-0 z-20 -mx-4 flex gap-2 border-b px-4 py-2 backdrop-blur md:-mx-8 md:px-8">
+              {[
+                { id: "graficos", label: "Gráficos" },
+                { id: "lista-tarefas", label: "Lista de tarefas" },
+              ].map((aba) => (
+                <button
+                  key={aba.id}
+                  type="button"
+                  onClick={() =>
+                    document.getElementById(aba.id)?.scrollIntoView({ behavior: "smooth" })
+                  }
+                  className="border-brand-border bg-card hover:bg-accent hover:text-brand-green rounded-full border px-4 py-1.5 text-sm font-medium transition-colors"
+                >
+                  {aba.label}
+                </button>
+              ))}
+            </nav>
 
-            <ResumoExecutivo
-              emMovimento={kpis.andamento + kpis.pendentes}
-              urgentes={kpis.urgentes}
-              altas={altas}
-              atrasadas={kpis.atrasadas}
-            />
+            <div id="graficos" className="scroll-mt-14 space-y-6">
+              <Charts rows={filtered} porCondominio={isTodosCondominios} />
 
-            <DemandaSectionTable
-              title="Tarefas em Aberto - Prioridade Urgente e Alta"
-              description="Detalhamento das tarefas que exigem acompanhamento mais próximo. As tarefas concluídas não foram detalhadas nesta seção."
-              rows={prioritarias}
-              showCondominio={mostraCondominioNasTabelas}
-            />
+              <ResumoExecutivo
+                emMovimento={kpis.andamento + kpis.pendentes}
+                urgentes={kpis.urgentes}
+                altas={altas}
+                atrasadas={kpis.atrasadas}
+              />
+            </div>
 
-            <DemandaSectionTable
-              title="Tarefas em Aberto - Acompanhamento Operacional"
-              description="Demais tarefas em andamento, não iniciadas, agendadas ou aguardando providências."
-              rows={operacionais}
-              showCondominio={mostraCondominioNasTabelas}
-            />
-
-            <DemandaSectionTable
-              title="Tarefas Concluídas"
-              description="Tarefas já concluídas ou canceladas, de todas as prioridades."
-              rows={concluidasRows}
-              showCondominio={mostraCondominioNasTabelas}
-            />
-
-            {construtora.length > 0 && (
+            <div id="lista-tarefas" className="scroll-mt-14 space-y-6">
               <DemandaSectionTable
-                title="Tarefas da Construtora"
-                description="Tarefas cuja responsabilidade é da Construtora."
-                rows={construtora}
+                title="Tarefas em Aberto - Prioridade Urgente e Alta"
+                description="Detalhamento das tarefas que exigem acompanhamento mais próximo. As tarefas concluídas não foram detalhadas nesta seção."
+                rows={prioritarias}
                 showCondominio={mostraCondominioNasTabelas}
               />
-            )}
+
+              <DemandaSectionTable
+                title="Tarefas em Aberto - Acompanhamento Operacional"
+                description="Demais tarefas em andamento, não iniciadas, agendadas ou aguardando providências."
+                rows={operacionais}
+                showCondominio={mostraCondominioNasTabelas}
+              />
+
+              <DemandaSectionTable
+                title="Tarefas Concluídas"
+                description="Tarefas já concluídas ou canceladas, de todas as prioridades."
+                rows={concluidasRows}
+                showCondominio={mostraCondominioNasTabelas}
+              />
+
+              {construtora.length > 0 && (
+                <DemandaSectionTable
+                  title="Tarefas da Construtora"
+                  description="Tarefas cuja responsabilidade é da Construtora."
+                  rows={construtora}
+                  showCondominio={mostraCondominioNasTabelas}
+                />
+              )}
+            </div>
           </>
         )}
 
