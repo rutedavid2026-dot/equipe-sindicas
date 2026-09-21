@@ -1906,7 +1906,10 @@ async function tratarAnexo(
 ): Promise<void> {
   const linhaSessao = await buscarLinhaSessao(chatId);
   const sessao = linhaSessao?.sessao;
-  if (!sessao || sessao.fluxo !== "atualizar" || sessao.step !== "recebendo_anexo") return;
+  if (!sessao || sessao.fluxo !== "atualizar" || sessao.step !== "recebendo_anexo") {
+    if (await garantirCadastro(chatId, null)) await mostrarMenuInicial(chatId);
+    return;
+  }
 
   try {
     const accessToken = await obterAccessTokenDrive();
@@ -2456,7 +2459,8 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
     return;
   }
 
-  await responderTelegram(chatId, `Não entendi essa mensagem.\n\n${TEXTO_MENU}`, MENU_PRINCIPAL);
+  // Qualquer mensagem sem contexto (não só /start) abre o menu inicial.
+  await mostrarMenuInicial(chatId);
 }
 
 export const Route = createFileRoute("/webhooks/telegram")({
