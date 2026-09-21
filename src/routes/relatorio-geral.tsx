@@ -326,7 +326,7 @@ function RelatorioGeralPage() {
           <>
             <KpiCards {...kpis} variant="gerencial" />
 
-            <Charts rows={filtered} />
+            <Charts rows={filtered} porCondominio={isTodosCondominios} />
 
             <ResumoExecutivo
               emMovimento={kpis.andamento + kpis.pendentes}

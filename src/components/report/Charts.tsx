@@ -4,6 +4,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Legend,
   LabelList,
   ResponsiveContainer,
   Tooltip,
@@ -11,7 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import type { Demanda } from "@/lib/notion.functions";
-import { normalizeForMatch, prioridadeList } from "@/lib/report-utils";
+import { isFechada, normalizeForMatch, prioridadeList, statusBucket } from "@/lib/report-utils";
 
 // Ordem igual ao PDF (Concluído, Em andamento, Não iniciado, Agendado,
 // Aguardando); os demais status (vocabulário mais rico de outros condomínios,
@@ -83,7 +84,32 @@ function MiniChart({ title, children }: { title: string; children: React.ReactNo
   );
 }
 
-export function Charts({ rows }: { rows: Demanda[] }) {
+export function Charts({
+  rows,
+  porCondominio = false,
+}: {
+  rows: Demanda[];
+  porCondominio?: boolean;
+}) {
+  // Tarefas em aberto por condomínio: barras horizontais (nomes longos cabem e
+  // 28 linhas se leem melhor que 28 colunas), ordenadas da maior pra menor,
+  // empilhadas em andamento + pendentes (soma = card "Tarefas em aberto").
+  const condominioData = useMemo(() => {
+    if (!porCondominio) return [];
+    const map = new Map<string, { name: string; andamento: number; pendentes: number }>();
+    rows.forEach((r) => {
+      if (isFechada(r.status)) return;
+      const name = r.condominio || "Sem condomínio";
+      const item = map.get(name) ?? { name, andamento: 0, pendentes: 0 };
+      if (statusBucket(r.status) === "andamento") item.andamento += 1;
+      else item.pendentes += 1;
+      map.set(name, item);
+    });
+    return Array.from(map.values())
+      .map((d) => ({ ...d, total: d.andamento + d.pendentes }))
+      .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+  }, [rows, porCondominio]);
+
   const statusData = useMemo(() => {
     const map = new Map<string, number>();
     rows.forEach((r) => {
@@ -124,6 +150,45 @@ export function Charts({ rows }: { rows: Demanda[] }) {
         <h2 className="text-brand-green text-lg font-bold tracking-tight">
           Gráficos de acompanhamento
         </h2>
+        {porCondominio && condominioData.length > 0 && (
+          <div className="border-brand-border bg-card mt-3 rounded-xl border p-5 shadow-sm">
+            <p className="text-muted-foreground text-center text-sm">
+              Tarefas em aberto por condomínio
+            </p>
+            <div className="mt-2 w-full" style={{ height: condominioData.length * 28 + 50 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={condominioData}
+                  layout="vertical"
+                  margin={{ left: 8, right: 32 }}
+                  barCategoryGap={4}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" horizontal={false} />
+                  <XAxis type="number" allowDecimals={false} />
+                  <YAxis
+                    type="category"
+                    dataKey="name"
+                    width={170}
+                    interval={0}
+                    tick={{ fontSize: 12 }}
+                  />
+                  <Tooltip />
+                  <Legend verticalAlign="top" height={24} />
+                  <Bar dataKey="andamento" name="Em andamento" stackId="a" fill="#2E5D7A" />
+                  <Bar
+                    dataKey="pendentes"
+                    name="Pendentes de ação"
+                    stackId="a"
+                    fill="#C66A2E"
+                    radius={[0, 4, 4, 0]}
+                  >
+                    <LabelList dataKey="total" position="right" fontSize={12} fontWeight={600} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
         <div className="mt-3 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           <MiniChart title="Tarefas por status">
             <ResponsiveContainer width="100%" height="100%">
