@@ -24,12 +24,22 @@
 //
 // Uso local:
 //   NOTION_API_KEY=ntn_... TELEGRAM_BOT_TOKEN=... node scripts/alertar-tarefas-atrasadas.mjs
+//
+// Modo de teste (não incomoda mais ninguém, não "queima" alertas reais):
+//   ALERTA_TESTE_CHAT_ID=<chat_id> — só envia pra essa pessoa (respeitando as
+//     preferências dela), ignora a deduplicação, NÃO grava em "Alertas
+//     Enviados" (senão os testes impediriam o alerta real de sair depois) e
+//     limita a ALERTA_TESTE_LIMITE mensagens (padrão 5), com prefixo 🧪.
+//   ALERTA_DRY_RUN=1 — só imprime o que enviaria, sem mandar nada.
 
 const NOTION_VERSION = "2022-06-28";
 const NOTION_API_KEY = process.env.NOTION_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ALERTAS_ENVIADOS_DB_ID = "3d9e69ba114f81c0b568eabc3e254819";
 const TELEGRAM_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
+const CHAT_ID_TESTE = process.env.ALERTA_TESTE_CHAT_ID || null;
+const LIMITE_TESTE = Number(process.env.ALERTA_TESTE_LIMITE ?? 5);
+const DRY_RUN = process.env.ALERTA_DRY_RUN === "1";
 
 if (!NOTION_API_KEY || !TELEGRAM_BOT_TOKEN) {
   console.error(
@@ -228,11 +238,19 @@ async function registrarAlerta({ tarefa, condominio, pageId, chatIds }) {
 
 async function main() {
   console.log("Buscando quem tem alerta ativo na base Telegram...");
-  const pessoas = await buscarPessoasComAlerta();
+  const todasPessoas = await buscarPessoasComAlerta();
+  const pessoas = CHAT_ID_TESTE
+    ? todasPessoas.filter((p) => p.chatId === CHAT_ID_TESTE)
+    : todasPessoas;
   console.log(`${pessoas.length} pessoa(s) com alertas ativos.`);
+  if (CHAT_ID_TESTE) {
+    console.log(
+      `🧪 MODO TESTE: só ${CHAT_ID_TESTE}, sem deduplicação, sem gravar registro, máx. ${LIMITE_TESTE} mensagem(ns)${DRY_RUN ? " (dry-run: nada é enviado)" : ""}.`,
+    );
+  }
 
   console.log("Buscando tarefas já alertadas (deduplicação)...");
-  const jaAlertados = await buscarPageIdsJaAlertados();
+  const jaAlertados = CHAT_ID_TESTE ? new Set() : await buscarPageIdsJaAlertados();
   console.log(`${jaAlertados.size} tarefa(s) já alertada(s) anteriormente.`);
 
   let enviados = 0;
@@ -261,6 +279,7 @@ async function main() {
       const chatIds = pessoas
         .filter((p) => p.condominios.has(nome) || p.tarefas.has(page.id))
         .map((p) => p.chatId);
+      if (CHAT_ID_TESTE && (chatIds.length === 0 || enviados >= LIMITE_TESTE)) continue;
       if (chatIds.length === 0) {
         erros.push(
           `${nome} — ${dados.tarefa}: ninguém elegível na base Telegram, alerta não enviado`,
@@ -270,11 +289,17 @@ async function main() {
 
       try {
         for (const chatId of chatIds) {
-          await enviarTelegram(chatId, montarMensagem(dados));
-          // Espaça os envios pra não estourar rate-limit da API do Telegram.
-          await new Promise((r) => setTimeout(r, 1000));
+          const mensagem =
+            (CHAT_ID_TESTE ? "🧪 TESTE — não é um alerta real\n\n" : "") + montarMensagem(dados);
+          if (DRY_RUN) {
+            console.log(`[dry-run] → ${chatId}: ${nome} — ${dados.tarefa}`);
+          } else {
+            await enviarTelegram(chatId, mensagem);
+            // Espaça os envios pra não estourar rate-limit da API do Telegram.
+            await new Promise((r) => setTimeout(r, 1000));
+          }
         }
-        await registrarAlerta({ ...dados, chatIds });
+        if (!CHAT_ID_TESTE) await registrarAlerta({ ...dados, chatIds });
         enviados++;
       } catch (err) {
         erros.push(`${nome} — ${dados.tarefa}: ${err.message}`);
