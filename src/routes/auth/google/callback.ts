@@ -38,7 +38,7 @@ export const Route = createFileRoute("/auth/google/callback")({
         deleteCookie(STATE_COOKIE_NAME, { path: "/" });
 
         if (!code || !state || !expectedState || state !== expectedState) {
-          return redirectTo(`${origin}/admin?error=state`);
+          return redirectTo(`${origin}/login?error=state`);
         }
 
         const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -57,13 +57,13 @@ export const Route = createFileRoute("/auth/google/callback")({
           const detail = await tokenRes.text();
           console.error("Google token exchange failed:", tokenRes.status, detail);
           return redirectTo(
-            `${origin}/admin?error=login_failed&reason=token_exchange&status=${tokenRes.status}`,
+            `${origin}/login?error=login_failed&reason=token_exchange&status=${tokenRes.status}`,
           );
         }
 
         const tokenJson = (await tokenRes.json()) as { id_token?: string };
         if (!tokenJson.id_token) {
-          return redirectTo(`${origin}/admin?error=login_failed&reason=no_id_token`);
+          return redirectTo(`${origin}/login?error=login_failed&reason=no_id_token`);
         }
 
         const claims = decodeIdToken(tokenJson.id_token);
@@ -79,11 +79,11 @@ export const Route = createFileRoute("/auth/google/callback")({
               : !validAudience
                 ? "bad_audience"
                 : "expired";
-          return redirectTo(`${origin}/admin?error=login_failed&reason=${reason}`);
+          return redirectTo(`${origin}/login?error=login_failed&reason=${reason}`);
         }
 
         if (!isEmailAllowed(claims.email)) {
-          return redirectTo(`${origin}/admin?error=denied`);
+          return redirectTo(`${origin}/login?error=denied`);
         }
 
         await updateSession<AuthSessionData>(getSessionConfig(), { email: claims.email });

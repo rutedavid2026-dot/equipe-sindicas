@@ -9,7 +9,7 @@ export const Route = createFileRoute("/auth/logout")({
         await clearSession(getSessionConfig());
         return new Response(null, {
           status: 302,
-          headers: { Location: new URL("/admin", request.url).toString() },
+          headers: { Location: new URL("/login", request.url).toString() },
         });
       },
     },

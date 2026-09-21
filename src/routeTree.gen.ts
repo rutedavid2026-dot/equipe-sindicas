@@ -13,6 +13,7 @@ import { Route as VivendasPlanoDeAcaoRouteImport } from './routes/vivendas-plano
 import { Route as RelatorioGeralRouteImport } from './routes/relatorio-geral'
 import { Route as OutrosFollowUpsRouteImport } from './routes/outros-follow-ups'
 import { Route as McpRouteImport } from './routes/mcp'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as GerenciarRouteImport } from './routes/gerenciar'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as CondominioRouteImport } from './routes/$condominio'
@@ -46,6 +47,11 @@ const OutrosFollowUpsRoute = OutrosFollowUpsRouteImport.update({
 const McpRoute = McpRouteImport.update({
   id: '/mcp',
   path: '/mcp',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const GerenciarRoute = GerenciarRouteImport.update({
@@ -127,6 +133,7 @@ export interface FileRoutesByFullPath {
   '/$condominio': typeof CondominioRoute
   '/admin': typeof AdminRoute
   '/gerenciar': typeof GerenciarRoute
+  '/login': typeof LoginRoute
   '/mcp': typeof McpRoute
   '/outros-follow-ups': typeof OutrosFollowUpsRoute
   '/relatorio-geral': typeof RelatorioGeralRoute
@@ -147,6 +154,7 @@ export interface FileRoutesByTo {
   '/$condominio': typeof CondominioRoute
   '/admin': typeof AdminRoute
   '/gerenciar': typeof GerenciarRoute
+  '/login': typeof LoginRoute
   '/mcp': typeof McpRoute
   '/outros-follow-ups': typeof OutrosFollowUpsRoute
   '/relatorio-geral': typeof RelatorioGeralRoute
@@ -168,6 +176,7 @@ export interface FileRoutesById {
   '/$condominio': typeof CondominioRoute
   '/admin': typeof AdminRoute
   '/gerenciar': typeof GerenciarRoute
+  '/login': typeof LoginRoute
   '/mcp': typeof McpRoute
   '/outros-follow-ups': typeof OutrosFollowUpsRoute
   '/relatorio-geral': typeof RelatorioGeralRoute
@@ -190,6 +199,7 @@ export interface FileRouteTypes {
     | '/$condominio'
     | '/admin'
     | '/gerenciar'
+    | '/login'
     | '/mcp'
     | '/outros-follow-ups'
     | '/relatorio-geral'
@@ -210,6 +220,7 @@ export interface FileRouteTypes {
     | '/$condominio'
     | '/admin'
     | '/gerenciar'
+    | '/login'
     | '/mcp'
     | '/outros-follow-ups'
     | '/relatorio-geral'
@@ -230,6 +241,7 @@ export interface FileRouteTypes {
     | '/$condominio'
     | '/admin'
     | '/gerenciar'
+    | '/login'
     | '/mcp'
     | '/outros-follow-ups'
     | '/relatorio-geral'
@@ -251,6 +263,7 @@ export interface RootRouteChildren {
   CondominioRoute: typeof CondominioRoute
   AdminRoute: typeof AdminRoute
   GerenciarRoute: typeof GerenciarRoute
+  LoginRoute: typeof LoginRoute
   McpRoute: typeof McpRoute
   OutrosFollowUpsRoute: typeof OutrosFollowUpsRoute
   RelatorioGeralRoute: typeof RelatorioGeralRoute
@@ -295,6 +308,13 @@ declare module '@tanstack/react-router' {
       path: '/mcp'
       fullPath: '/mcp'
       preLoaderRoute: typeof McpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/gerenciar': {
@@ -403,6 +423,7 @@ const rootRouteChildren: RootRouteChildren = {
   CondominioRoute: CondominioRoute,
   AdminRoute: AdminRoute,
   GerenciarRoute: GerenciarRoute,
+  LoginRoute: LoginRoute,
   McpRoute: McpRoute,
   OutrosFollowUpsRoute: OutrosFollowUpsRoute,
   RelatorioGeralRoute: RelatorioGeralRoute,

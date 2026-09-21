@@ -16,7 +16,7 @@ export const getCurrentUser = createServerFn({ method: "GET" }).handler(
 export async function requireAuth() {
   const user = await getCurrentUser();
   if (!user) {
-    throw redirect({ to: "/admin" });
+    throw redirect({ to: "/login" });
   }
   return { user };
 }
