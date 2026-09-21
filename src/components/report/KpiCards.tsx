@@ -33,7 +33,7 @@ export function KpiCards({
       ? [
           { label: "Tarefas em aberto", value: andamento + pendentes },
           { label: "Em andamento", value: andamento },
-          { label: "Pendentes", value: pendentes },
+          { label: "Pendentes de ação", value: pendentes },
           { label: "Urgentes", value: urgentes },
           { label: "Atrasadas", value: atrasadas, destaque: atrasadas > 0 },
         ]
