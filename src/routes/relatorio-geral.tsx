@@ -260,7 +260,7 @@ function RelatorioGeralPage() {
     ? (historicoQuery.data?.capturadoEm ?? null)
     : dataUltimaEdicaoLive;
 
-  const descricao = `Este dashboard gerencial apresenta o acompanhamento consolidado das tarefas de ${isTodosCondominios ? "todos os condomínios" : condominioLabel}, com foco em tarefa, data de criação, status e última atualização registrada. Foram consideradas ${kpis.total} tarefa${kpis.total === 1 ? "" : "s"} no total; o detalhamento abaixo organiza as tarefas em aberto por prioridade, com as concluídas numa seção própria.`;
+  const descricao = `Este dashboard gerencial apresenta o acompanhamento consolidado das tarefas de ${isTodosCondominios ? "todos os condomínios" : condominioLabel}, com foco em tarefa, data de criação, status e última atualização registrada. Há ${kpis.andamento + kpis.pendentes} tarefa${kpis.andamento + kpis.pendentes === 1 ? "" : "s"} em aberto (${kpis.concluidas} já concluída${kpis.concluidas === 1 ? "" : "s"}); o detalhamento abaixo organiza as tarefas em aberto por prioridade, com as concluídas numa seção própria.`;
 
   const mostraCondominioNasTabelas = isTodosCondominios || selecionadosIds.length > 1;
 

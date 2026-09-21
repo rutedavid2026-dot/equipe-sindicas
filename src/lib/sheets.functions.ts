@@ -412,7 +412,21 @@ export const getHistoricoSemana = createServerFn({ method: "GET" })
   .handler(async ({ data }): Promise<HistoricoResult> => {
     const all = await fetchAllHistoricoRows(data.condominioSlug, data.condominioSlugs);
     const wantedWeekN = weekNumberFromIso(data.semanaInicio);
-    const rows = all.filter((r) => r.semanaN === wantedWeekN);
+    // Uma tarefa = um PageId. Se a mesma tarefa aparece mais de uma vez na
+    // semana (abas compartilhadas, capturas com SemanaInicio divergente), fica
+    // a captura mais recente — assim o total é o número real de tarefas.
+    const porId = new Map<string, RawRow>();
+    const semId: RawRow[] = [];
+    for (const r of all) {
+      if (r.semanaN !== wantedWeekN) continue;
+      if (!r.id) {
+        semId.push(r);
+        continue;
+      }
+      const atual = porId.get(r.id);
+      if (!atual || r.capturadoEm >= atual.capturadoEm) porId.set(r.id, r);
+    }
+    const rows = [...porId.values(), ...semId];
 
     if (rows.length === 0) {
       return { data: [], semanaN: null, capturadoEm: null };

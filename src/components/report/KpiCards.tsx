@@ -25,19 +25,31 @@ export function KpiCards({
   atrasadas,
   variant = "default",
 }: Props) {
-  const kpis: Kpi[] = [
-    { label: "Total de tarefas", value: total },
-    { label: "Concluídas", value: concluidas },
-    { label: "Em andamento", value: andamento },
-    { label: "Pendentes", value: pendentes },
-    { label: "Urgentes", value: urgentes },
-    { label: "Atrasadas", value: atrasadas, destaque: atrasadas > 0 },
-    ...(canceladas > 0 ? [{ label: "Canceladas", value: canceladas }] : []),
-  ];
+  // Visão gerencial: o número de destaque são as tarefas em aberto; andamento,
+  // pendentes, urgentes e atrasadas são recortes dentro delas. Concluídas e
+  // canceladas ficam fora dos cards (concluídas têm seção própria na página).
+  const kpis: Kpi[] =
+    variant === "gerencial"
+      ? [
+          { label: "Tarefas em aberto", value: andamento + pendentes },
+          { label: "Em andamento", value: andamento },
+          { label: "Pendentes", value: pendentes },
+          { label: "Urgentes", value: urgentes },
+          { label: "Atrasadas", value: atrasadas, destaque: atrasadas > 0 },
+        ]
+      : [
+          { label: "Total de tarefas", value: total },
+          { label: "Concluídas", value: concluidas },
+          { label: "Em andamento", value: andamento },
+          { label: "Pendentes", value: pendentes },
+          { label: "Urgentes", value: urgentes },
+          { label: "Atrasadas", value: atrasadas, destaque: atrasadas > 0 },
+          ...(canceladas > 0 ? [{ label: "Canceladas", value: canceladas }] : []),
+        ];
 
   return (
     <div
-      className={`grid grid-cols-2 gap-3 md:grid-cols-3 ${kpis.length > 6 ? "lg:grid-cols-7" : "lg:grid-cols-6"}`}
+      className={`grid grid-cols-2 gap-3 md:grid-cols-3 ${kpis.length > 6 ? "lg:grid-cols-7" : kpis.length === 5 ? "lg:grid-cols-5" : "lg:grid-cols-6"}`}
     >
       {kpis.map((k) =>
         variant === "gerencial" ? (
