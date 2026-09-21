@@ -4,6 +4,7 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  LabelList,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -141,6 +142,7 @@ export function Charts({ rows }: { rows: Demanda[] }) {
                   {statusData.map((entry) => (
                     <Cell key={entry.name} fill={STATUS_COLORS[entry.name] ?? "#64748b"} />
                   ))}
+                  <LabelList dataKey="total" position="top" fontSize={12} fontWeight={600} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -157,6 +159,7 @@ export function Charts({ rows }: { rows: Demanda[] }) {
                   {prioridadeData.map((entry) => (
                     <Cell key={entry.name} fill={PRIORIDADE_COLORS[entry.name] ?? "#64748b"} />
                   ))}
+                  <LabelList dataKey="total" position="top" fontSize={12} fontWeight={600} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -179,6 +182,7 @@ export function Charts({ rows }: { rows: Demanda[] }) {
                   {situacaoPrazoData.map((entry) => (
                     <Cell key={entry.name} fill={SITUACAO_PRAZO_COLORS[entry.name] ?? "#64748b"} />
                   ))}
+                  <LabelList dataKey="total" position="top" fontSize={12} fontWeight={600} />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
