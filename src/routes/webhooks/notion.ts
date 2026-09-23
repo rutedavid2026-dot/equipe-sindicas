@@ -232,6 +232,78 @@ async function resolverDatabaseId(entity: { id?: string; type?: string } | undef
   return null;
 }
 
+// Duplicado de STATUS_CONCLUIDO/STATUS_CANCELADO (src/lib/report-utils.ts) —
+// mesma nota de "duplicada de propósito" do resto deste arquivo: essa rota
+// roda isolada, sem importar módulos "de UI" do resto do app.
+const STATUS_FECHADO = ["Concluído", "Feito", "Concluída", "Cancelado", "Cancelada"];
+
+function normalizeForMatch(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+// A Notion não guarda (nem expõe por webhook ou API) o histórico de quando
+// uma propriedade mudou — só o valor atual. Sem isso, a fórmula "Situação do
+// Prazo" (AjustarTarefasInternas.gs / PadronizarDatabase.gs) não tem como
+// saber que uma tarefa terminou quando ninguém preenche "Data de Conclusão"
+// à mão — ela caía como "Atrasada" (bug corrigido em 2026-09-22, ver
+// conversa) e agora cai como "Sem data de conclusão", o que ainda exige
+// alguém lembrar de voltar lá e preencher a data.
+//
+// Em vez de depender disso, todo evento de edição de uma PÁGINA (= uma linha
+// de tarefa) passa por aqui: se o Status virou concluído/cancelado e "Data
+// de Conclusão" ainda está vazia, preenche com a data de hoje na hora — o
+// mais próximo que dá de capturar "quando a tarefa foi concluída" sem ter
+// histórico de verdade (é a data em que a mudança de Status chegou aqui via
+// webhook, não necessariamente a data "real" que a síndica tinha em mente).
+// Best-effort: qualquer falha aqui não deve derrubar a captura normal do
+// evento (chamada dentro de try/catch por quem chama).
+async function preencherDataConclusaoSeNecessario(pageId: string): Promise<void> {
+  for (const token of getNotionTokens()) {
+    const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      headers: { Authorization: `Bearer ${token}`, "Notion-Version": "2022-06-28" },
+    });
+    if (!res.ok) continue; // tenta o próximo token (mesmo padrão do resto deste arquivo)
+
+    const page = (await res.json()) as {
+      properties?: Record<
+        string,
+        { type: string; status?: { name?: string } | null; date?: { start?: string } | null }
+      >;
+    };
+    const status = page.properties?.["Status"];
+    const dataConclusao = page.properties?.["Data de Conclusão"];
+    if (!status || status.type !== "status") return;
+    if (!dataConclusao || dataConclusao.type !== "date") return;
+
+    const nomeStatus = status.status?.name ?? "";
+    const fechado = STATUS_FECHADO.some((s) => normalizeForMatch(s) === normalizeForMatch(nomeStatus));
+    if (!fechado || dataConclusao.date) return; // ainda aberta, ou já tem data — nada a fazer
+
+    const hoje = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" }); // YYYY-MM-DD
+    const patch = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ properties: { "Data de Conclusão": { date: { start: hoje } } } }),
+    });
+    if (patch.ok) {
+      console.log(
+        `Notion webhook: preencheu "Data de Conclusão" (${hoje}) da página ${pageId} (Status: "${nomeStatus}").`,
+      );
+    } else {
+      console.warn(`Notion webhook: falha ao preencher "Data de Conclusão" da página ${pageId}: HTTP ${patch.status}`);
+    }
+    return;
+  }
+}
+
 function extrairDatabaseId(url: string): string | null {
   const m = url.match(/[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}/);
   return m ? m[0].replace(/-/g, "") : null;
@@ -385,6 +457,20 @@ export const Route = createFileRoute("/webhooks/notion")({
           }
         } else {
           console.warn("Notion webhook: NOTION_WEBHOOK_SECRET não configurado — aceitando evento sem validar origem.");
+        }
+
+        // Preenche "Data de Conclusão" automaticamente quando o evento é a
+        // edição de uma linha (page) — independente de sheetsToken/planilha,
+        // então roda mesmo se a captura completa abaixo falhar. Best-effort:
+        // não deixa a resposta do webhook (nem a captura) esperar por um erro
+        // aqui.
+        const entityRaiz = json.entity as { id?: string; type?: string } | undefined;
+        if (entityRaiz?.type === "page" && entityRaiz.id) {
+          try {
+            await preencherDataConclusaoSeNecessario(entityRaiz.id);
+          } catch (err) {
+            console.warn("Notion webhook: falha ao tentar preencher Data de Conclusão automaticamente:", err);
+          }
         }
 
         const sheetsToken = serviceAccount ? await getAccessToken(serviceAccount) : null;
