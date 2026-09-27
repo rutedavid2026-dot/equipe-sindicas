@@ -2,8 +2,20 @@ name: Capturar histórico semanal (Notion -> Sheets)
 
 on:
   schedule:
-    # Toda sexta às 11:00 UTC (8h no horário de Brasília) — mesmo horário que
-    # o trigger do Apps Script (capturarTodasFotografias) já usava.
+    # A cada 3h, o dia inteiro — rede de segurança pro webhook do Notion
+    # (src/routes/webhooks/notion.ts), que já ficou mudo por mais de um dia
+    # sem avisar ninguém (2026-09-19 e de novo 2026-09-25→27, confirmado
+    # comparando last_edited_time do Notion com o _webhook_log: edições reais
+    # sem nenhum evento correspondente). Webhook funcionando = essa captura
+    # roda em cima de dados já atualizados e não faz diferença. Webhook
+    # mudo = a fotografia da semana nunca fica mais de ~3h desatualizada, em
+    # vez de até uma semana inteira (antes disso, o único fallback era a
+    # captura semanal de sexta abaixo). Sem custo extra: cada rodada só lê o
+    # que muda no Notion, não regrava história antiga.
+    - cron: "0 */3 * * *"
+    # Mantida como redundância explícita (não faz mal rodar 2x no mesmo
+    # horário) — se algum dia a cadência de 3h for reduzida, isso garante
+    # que pelo menos uma captura por semana continua garantida.
     - cron: "0 11 * * 5"
   workflow_dispatch:
     inputs:
