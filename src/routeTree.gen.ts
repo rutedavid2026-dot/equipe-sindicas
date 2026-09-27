@@ -21,6 +21,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as WebhooksTelegramRouteImport } from './routes/webhooks/telegram'
 import { Route as WebhooksNotionRouteImport } from './routes/webhooks/notion'
 import { Route as AuthLogoutRouteImport } from './routes/auth/logout'
+import { Route as AtualizarCondominioRouteImport } from './routes/atualizar/$condominio'
 import { Route as Char91DotwellKnownChar93OauthProtectedResourceRouteImport } from './routes/[.well-known]/oauth-protected-resource'
 import { Route as Char91DotmcpChar93ListToolsRouteImport } from './routes/[.mcp]/list-tools'
 import { Route as AuthGoogleStartRouteImport } from './routes/auth/google/start'
@@ -89,6 +90,11 @@ const AuthLogoutRoute = AuthLogoutRouteImport.update({
   path: '/auth/logout',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AtualizarCondominioRoute = AtualizarCondominioRouteImport.update({
+  id: '/atualizar/$condominio',
+  path: '/atualizar/$condominio',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const Char91DotwellKnownChar93OauthProtectedResourceRoute =
   Char91DotwellKnownChar93OauthProtectedResourceRouteImport.update({
     id: '/.well-known/oauth-protected-resource',
@@ -140,6 +146,7 @@ export interface FileRoutesByFullPath {
   '/vivendas-plano-de-acao': typeof VivendasPlanoDeAcaoRoute
   '/.mcp/list-tools': typeof Char91DotmcpChar93ListToolsRoute
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
+  '/atualizar/$condominio': typeof AtualizarCondominioRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/webhooks/notion': typeof WebhooksNotionRoute
   '/webhooks/telegram': typeof WebhooksTelegramRoute
@@ -161,6 +168,7 @@ export interface FileRoutesByTo {
   '/vivendas-plano-de-acao': typeof VivendasPlanoDeAcaoRoute
   '/.mcp/list-tools': typeof Char91DotmcpChar93ListToolsRoute
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
+  '/atualizar/$condominio': typeof AtualizarCondominioRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/webhooks/notion': typeof WebhooksNotionRoute
   '/webhooks/telegram': typeof WebhooksTelegramRoute
@@ -183,6 +191,7 @@ export interface FileRoutesById {
   '/vivendas-plano-de-acao': typeof VivendasPlanoDeAcaoRoute
   '/.mcp/list-tools': typeof Char91DotmcpChar93ListToolsRoute
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
+  '/atualizar/$condominio': typeof AtualizarCondominioRoute
   '/auth/logout': typeof AuthLogoutRoute
   '/webhooks/notion': typeof WebhooksNotionRoute
   '/webhooks/telegram': typeof WebhooksTelegramRoute
@@ -206,6 +215,7 @@ export interface FileRouteTypes {
     | '/vivendas-plano-de-acao'
     | '/.mcp/list-tools'
     | '/.well-known/oauth-protected-resource'
+    | '/atualizar/$condominio'
     | '/auth/logout'
     | '/webhooks/notion'
     | '/webhooks/telegram'
@@ -227,6 +237,7 @@ export interface FileRouteTypes {
     | '/vivendas-plano-de-acao'
     | '/.mcp/list-tools'
     | '/.well-known/oauth-protected-resource'
+    | '/atualizar/$condominio'
     | '/auth/logout'
     | '/webhooks/notion'
     | '/webhooks/telegram'
@@ -248,6 +259,7 @@ export interface FileRouteTypes {
     | '/vivendas-plano-de-acao'
     | '/.mcp/list-tools'
     | '/.well-known/oauth-protected-resource'
+    | '/atualizar/$condominio'
     | '/auth/logout'
     | '/webhooks/notion'
     | '/webhooks/telegram'
@@ -270,6 +282,7 @@ export interface RootRouteChildren {
   VivendasPlanoDeAcaoRoute: typeof VivendasPlanoDeAcaoRoute
   Char91DotmcpChar93ListToolsRoute: typeof Char91DotmcpChar93ListToolsRoute
   Char91DotwellKnownChar93OauthProtectedResourceRoute: typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
+  AtualizarCondominioRoute: typeof AtualizarCondominioRoute
   AuthLogoutRoute: typeof AuthLogoutRoute
   WebhooksNotionRoute: typeof WebhooksNotionRoute
   WebhooksTelegramRoute: typeof WebhooksTelegramRoute
@@ -366,6 +379,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthLogoutRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/atualizar/$condominio': {
+      id: '/atualizar/$condominio'
+      path: '/atualizar/$condominio'
+      fullPath: '/atualizar/$condominio'
+      preLoaderRoute: typeof AtualizarCondominioRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/.well-known/oauth-protected-resource': {
       id: '/.well-known/oauth-protected-resource'
       path: '/.well-known/oauth-protected-resource'
@@ -431,6 +451,7 @@ const rootRouteChildren: RootRouteChildren = {
   Char91DotmcpChar93ListToolsRoute: Char91DotmcpChar93ListToolsRoute,
   Char91DotwellKnownChar93OauthProtectedResourceRoute:
     Char91DotwellKnownChar93OauthProtectedResourceRoute,
+  AtualizarCondominioRoute: AtualizarCondominioRoute,
   AuthLogoutRoute: AuthLogoutRoute,
   WebhooksNotionRoute: WebhooksNotionRoute,
   WebhooksTelegramRoute: WebhooksTelegramRoute,

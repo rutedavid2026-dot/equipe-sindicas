@@ -363,7 +363,13 @@ async function verificarAssinatura(rawBody: string, assinaturaRecebida: string |
 // garante que toda edição real eventualmente resulta numa atualização, sem
 // depender de uma edição seguinte pra "destravar" (era o problema do
 // debounce anterior, que descartava eventos dentro de uma janela fixa).
-async function dispararCaptura(condominioSlug: string | null): Promise<{ disparado: boolean; motivo: string }> {
+// Exportada pra ser reaproveitada por src/routes/atualizar/$condominio.ts —
+// o "botão" de atualização manual dentro de cada database do Notion (link
+// mesmo, já que a API do Notion não expõe blocos de Button pra criação —
+// confirmado lendo notion://docs/enhanced-markdown-spec em 2026-09-27, não
+// existe tag de Button na spec). Mesmo disparo, mesma fila/concurrency do
+// workflow — só muda quem chama (Notion via webhook vs. clique manual).
+export async function dispararCaptura(condominioSlug: string | null): Promise<{ disparado: boolean; motivo: string }> {
   const token = process.env.GH_WORKFLOW_TOKEN;
   if (!token) {
     return { disparado: false, motivo: "GH_WORKFLOW_TOKEN não configurado" };
