@@ -177,6 +177,20 @@ const MENU_PRINCIPAL = {
 
 type ReplyMarkup = { inline_keyboard: { text: string; callback_data: string }[][] };
 
+// Garante "🔙 Voltar ao início" em todo teclado de fluxo: acrescenta a linha
+// do botão quando ela ainda não está lá. O menu principal (que já é o
+// início) fica de fora.
+function comBotaoVoltar(replyMarkup?: ReplyMarkup): ReplyMarkup {
+  if (!replyMarkup) return MENU_VOLTAR;
+  if (replyMarkup === MENU_PRINCIPAL) return replyMarkup;
+  const jaTem = replyMarkup.inline_keyboard.some((linha) =>
+    linha.some((b) => b.callback_data === BOTAO_VOLTAR.callback_data),
+  );
+  return jaTem
+    ? replyMarkup
+    : { inline_keyboard: [...replyMarkup.inline_keyboard, [BOTAO_VOLTAR]] };
+}
+
 async function responderTelegram(
   chatId: number,
   texto: string,
@@ -188,7 +202,7 @@ async function responderTelegram(
     body: JSON.stringify({
       chat_id: chatId,
       text: texto,
-      reply_markup: replyMarkup ?? MENU_VOLTAR,
+      reply_markup: comBotaoVoltar(replyMarkup),
     }),
   });
 }
@@ -211,7 +225,7 @@ async function editarMensagem(
       chat_id: chatId,
       message_id: messageId,
       text: texto,
-      reply_markup: replyMarkup ?? MENU_VOLTAR,
+      reply_markup: comBotaoVoltar(replyMarkup),
     }),
   });
 }
