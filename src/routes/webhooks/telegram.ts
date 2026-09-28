@@ -2622,8 +2622,9 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
   const linhaSessao = await buscarLinhaSessao(chatId);
   const sessao = linhaSessao?.sessao;
   if (!sessao) {
-    // Nenhuma conversa em andamento e não é um comando reconhecido — ignora
-    // silenciosamente (evita responder a qualquer mensagem solta no chat).
+    // Nenhuma conversa em andamento e não é um comando reconhecido (ex.: "oi")
+    // — abre o menu inicial em vez de ficar em silêncio.
+    await mostrarMenuInicial(chatId);
     return;
   }
 
