@@ -240,7 +240,28 @@ const TEXTO_MENU =
   'Ex.: "Atualizar no Jazz Club a tarefa do elevador, concluído, técnico já trocou a peça".\n' +
   "Eu pergunto por botões só o que faltar.";
 
+// Remove qualquer teclado personalizado (ReplyKeyboardMarkup) que possa ter
+// ficado grudado no chat de uma versão bem antiga do bot, de antes deste
+// projeto migrar tudo pra inline_keyboard (botão colado na própria
+// mensagem). Um teclado desses fica na tela até alguém mandar
+// remove_keyboard explicitamente — uma mensagem nova com inline_keyboard
+// não apaga ele sozinha, e os dois tipos não podem ir na mesma mensagem, daí
+// precisar dessa mensagem curta à parte antes do menu de verdade. Garante
+// que o menu principal nunca fique escondido atrás do ícone de teclado.
+async function removerTecladoAntigo(chatId: number): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${telegramToken()}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: "🤖",
+      reply_markup: { remove_keyboard: true },
+    }),
+  });
+}
+
 async function mostrarMenuInicial(chatId: number): Promise<void> {
+  await removerTecladoAntigo(chatId);
   await responderTelegram(chatId, TEXTO_MENU, MENU_PRINCIPAL);
 }
 
