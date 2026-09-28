@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { isFechada, normalizeForMatch } from "@/lib/report-utils";
+import { isFechada, normalizeForMatch, splitLista } from "@/lib/report-utils";
 
 // Recebe mensagens do bot do Telegram (@equipesindicas_bot) e permite criar e
 // atualizar tarefas direto pelo chat, sem abrir o Notion.
@@ -542,7 +542,7 @@ async function mostrarChecklistTarefas(
     `🎯 ${nome} — toque para seguir/deixar de seguir uma tarefa específica (independente dos condomínios monitorados).`,
     {
       inline_keyboard: [
-        ...tarefas.map((t) => [
+        ...tarefas.slice(0, LIMITE_BOTOES_TAREFA).map((t) => [
           {
             text: `${seguidas.has(t.id) ? "✅" : "⬜"} ${truncar(t.titulo, 50)}`,
             callback_data: `alertatarefa:${t.id}`,
@@ -689,7 +689,14 @@ type SessaoNovaTarefa = {
 
 type SessaoAtualizarTarefa = {
   fluxo: "atualizar";
-  step: "tarefa" | "status" | "texto" | "anexo" | "recebendo_anexo" | "confirmar_audio";
+  step:
+    | "responsavel"
+    | "tarefa"
+    | "status"
+    | "texto"
+    | "anexo"
+    | "recebendo_anexo"
+    | "confirmar_audio";
   condominio: string;
   databaseId: string;
   statusOptions: string[];
@@ -1622,30 +1629,90 @@ async function processarComCondominioResolvido(
   });
 }
 
-async function buscarTarefasAbertas(databaseId: string): Promise<{ id: string; titulo: string }[]> {
-  const json = (await notionFetch(`databases/${databaseId}/query`, {
-    method: "POST",
-    body: JSON.stringify({
-      page_size: 30,
-      sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
-    }),
-  })) as {
-    results: {
-      id: string;
-      properties: Record<string, { status?: { name: string }; title?: { plain_text: string }[] }>;
-    }[];
-  };
+// Teclado do Telegram fica inviável com uma lista grande demais de botões —
+// cada tela que lista tarefas sem filtro nenhum (todas do condomínio) corta
+// aqui; a tela filtrada por responsável raramente chega perto disso.
+const LIMITE_BOTOES_TAREFA = 40;
 
-  return json.results
-    .filter((p) => {
+type TarefaAberta = {
+  id: string;
+  titulo: string;
+  // Nomes e (quando o campo é "people") ids de quem está no Responsável —
+  // guardados nos dois formatos porque a comparação por id é exata (nomes de
+  // usuário do Notion podem repetir) mas só existe pra tipo "people"; pros
+  // demais tipos (select/multi_select/rich_text) só dá pra comparar por nome.
+  responsavelNomes: string[];
+  responsavelIds: string[];
+};
+
+// Percorre a database inteira (todas as páginas, não só uma amostra) — antes
+// buscava só as 30 tarefas mais recentemente editadas da base inteira e
+// filtrava as fechadas depois, então uma base com muitas tarefas concluídas
+// recentes escondia tarefas abertas mais antigas sem nunca chegar a olhar
+// pra elas (bug real relatado: Moana tinha dezenas de tarefas abertas e só
+// 9 apareciam). Cada chamador decide seu próprio limite de exibição.
+async function buscarTarefasAbertas(databaseId: string): Promise<TarefaAberta[]> {
+  const resultados: TarefaAberta[] = [];
+  let cursor: string | undefined;
+  do {
+    const json = (await notionFetch(`databases/${databaseId}/query`, {
+      method: "POST",
+      body: JSON.stringify({
+        page_size: 100,
+        sorts: [{ timestamp: "last_edited_time", direction: "descending" }],
+        ...(cursor ? { start_cursor: cursor } : {}),
+      }),
+    })) as {
+      results: {
+        id: string;
+        properties: Record<
+          string,
+          {
+            status?: { name: string };
+            title?: { plain_text: string }[];
+            people?: { id: string; name?: string }[];
+            select?: { name: string };
+            multi_select?: { name: string }[];
+            rich_text?: { plain_text: string }[];
+          }
+        >;
+      }[];
+      has_more: boolean;
+      next_cursor: string | null;
+    };
+
+    for (const p of json.results) {
       const status = p.properties["Status"]?.status?.name;
-      return status && !isFechada(status);
-    })
-    .slice(0, 15)
-    .map((p) => ({
-      id: p.id,
-      titulo: p.properties["Tarefas"]?.title?.[0]?.plain_text ?? "(sem título)",
-    }));
+      if (!status || isFechada(status)) continue;
+
+      const responsavelProp = p.properties["Responsável"];
+      const responsavelNomes: string[] = [];
+      const responsavelIds: string[] = [];
+      if (responsavelProp?.people) {
+        for (const pessoa of responsavelProp.people) {
+          if (pessoa.id) responsavelIds.push(pessoa.id);
+          if (pessoa.name) responsavelNomes.push(pessoa.name);
+        }
+      } else if (responsavelProp?.multi_select) {
+        for (const o of responsavelProp.multi_select) responsavelNomes.push(o.name);
+      } else if (responsavelProp?.select?.name) {
+        responsavelNomes.push(responsavelProp.select.name);
+      } else if (responsavelProp?.rich_text) {
+        const texto = responsavelProp.rich_text.map((t) => t.plain_text).join("");
+        if (texto) responsavelNomes.push(...splitLista(texto));
+      }
+
+      resultados.push({
+        id: p.id,
+        titulo: p.properties["Tarefas"]?.title?.[0]?.plain_text ?? "(sem título)",
+        responsavelNomes,
+        responsavelIds,
+      });
+    }
+    cursor = json.has_more ? (json.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+
+  return resultados;
 }
 
 // ---------------------------------------------------------------------------
@@ -1828,9 +1895,9 @@ async function processarAtualizacaoComCondominioResolvido(
       chatId,
       `🎙️ Entendi: "${transcricao}"\n\nNão encontrei com certeza qual tarefa é — escolha abaixo.\n\n🏢 ${condominio}\n📋 Qual tarefa?`,
       {
-        inline_keyboard: tarefasAbertas.map((t) => [
-          { text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` },
-        ]),
+        inline_keyboard: tarefasAbertas
+          .slice(0, LIMITE_BOTOES_TAREFA)
+          .map((t) => [{ text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` }]),
       },
     );
     return;
@@ -1900,6 +1967,48 @@ async function finalizarAtualizacao(chatId: number, sessao: SessaoAtualizarTaref
   );
 }
 
+// Passo "texto" do fluxo Atualizar Tarefa — aceita tanto uma mensagem de
+// texto quanto a transcrição de um áudio (ver dispatch no handler de
+// voice/audio do POST), tratados exatamente da mesma forma daqui pra frente.
+async function processarTextoAtualizacao(
+  chatId: number,
+  sessao: SessaoAtualizarTarefa,
+  texto: string,
+): Promise<void> {
+  if (sessao.viaAudio) {
+    // Veio de um áudio que já criou a sessão inteira sozinho (status já
+    // resolvido antes de chegar aqui) — confirma antes de gravar, em vez de
+    // aplicar direto como no fluxo manual guiado por botões.
+    const confirmando: SessaoAtualizarTarefa = {
+      ...sessao,
+      step: "confirmar_audio",
+      textoPendente: texto,
+    };
+    await salvarSessao(chatId, confirmando);
+    await responderTelegram(
+      chatId,
+      resumoConfirmacaoAtualizacao(confirmando),
+      BOTOES_CONFIRMAR_AUDIO,
+    );
+    return;
+  }
+  await atualizarTarefa(sessao.pageId!, sessao.novoStatus, texto);
+  const nova: SessaoAtualizarTarefa = { ...sessao, step: "anexo" };
+  await salvarSessao(chatId, nova);
+  await responderTelegram(
+    chatId,
+    "📎 Quer anexar foto, vídeo ou documento a esta tarefa? Toque em Sim ou Não.",
+    {
+      inline_keyboard: [
+        [
+          { text: "Sim", callback_data: "anexar:sim" },
+          { text: "Não", callback_data: "anexar:nao" },
+        ],
+      ],
+    },
+  );
+}
+
 async function tratarAnexo(
   chatId: number,
   arquivo: { fileId: string; nomeSugerido: string; mimeType: string },
@@ -1945,18 +2054,78 @@ async function tratarAnexo(
   }
 }
 
-async function iniciarEscolhaTarefa(
+// Passo "escolher o responsável" do fluxo Atualizar Tarefa: além de guiar a
+// pessoa até a tarefa certa mais rápido, filtrar por responsável de cara
+// reduz bastante a lista mostrada — não depende do limite de exibição
+// (LIMITE_BOTOES_TAREFA) sobrar tarefa de fora, já que cada responsável só
+// tem uma fração das tarefas do condomínio.
+async function iniciarEscolhaResponsavelAtualizar(
   chatId: number,
   condominio: string,
   databaseId: string,
   chave: string,
 ): Promise<void> {
-  const [tarefas, schema] = await Promise.all([
-    buscarTarefasAbertas(databaseId),
-    buscarSchemaCondominio(databaseId, chave),
-  ]);
+  const schema = await buscarSchemaCondominio(databaseId, chave);
+  const r = schema.responsavel;
+
+  if (r.opcoes.length === 0) {
+    // Base sem opções de Responsável cadastradas — não faz sentido perguntar,
+    // vai direto pra lista de tarefas sem filtro.
+    await iniciarEscolhaTarefa(chatId, condominio, databaseId, schema.statusOptions);
+    return;
+  }
+
+  await salvarSessao(chatId, {
+    fluxo: "atualizar",
+    step: "responsavel",
+    condominio,
+    databaseId,
+    statusOptions: schema.statusOptions,
+  });
+
+  const botoes: { text: string; callback_data: string }[][] = [];
+  if (r.tipo === "people") {
+    for (const p of r.opcoes)
+      botoes.push([{ text: p.nome, callback_data: `respatualizar:id:${p.id}` }]);
+  } else {
+    for (const nome of r.opcoes)
+      botoes.push([{ text: nome, callback_data: `respatualizar:nome:${nome}` }]);
+  }
+  botoes.push([{ text: "👥 Todos os responsáveis", callback_data: "respatualizar:todos" }]);
+
+  await responderTelegram(
+    chatId,
+    `🏢 ${condominio}\n\n👤 De qual responsável você quer ver as tarefas? Toque em uma opção (ou veja de todos).`,
+    { inline_keyboard: botoes },
+  );
+}
+
+async function iniciarEscolhaTarefa(
+  chatId: number,
+  condominio: string,
+  databaseId: string,
+  statusOptions: string[],
+  filtro?: { tipo: "id" | "nome"; valor: string },
+): Promise<void> {
+  const todas = await buscarTarefasAbertas(databaseId);
+  const tarefas = filtro
+    ? todas.filter((t) =>
+        filtro.tipo === "id"
+          ? t.responsavelIds.includes(filtro.valor)
+          : t.responsavelNomes.some(
+              (n) => normalizeForMatch(n) === normalizeForMatch(filtro.valor),
+            ),
+      )
+    : todas;
+
   if (tarefas.length === 0) {
-    await responderTelegram(chatId, `Nenhuma tarefa em aberto em ${condominio}.`, MENU_PRINCIPAL);
+    await responderTelegram(
+      chatId,
+      filtro
+        ? `Nenhuma tarefa em aberto de ${filtro.valor} em ${condominio}.`
+        : `Nenhuma tarefa em aberto em ${condominio}.`,
+      MENU_PRINCIPAL,
+    );
     return;
   }
   await salvarSessao(chatId, {
@@ -1964,15 +2133,15 @@ async function iniciarEscolhaTarefa(
     step: "tarefa",
     condominio,
     databaseId,
-    statusOptions: schema.statusOptions,
+    statusOptions,
   });
   await responderTelegram(
     chatId,
     `🏢 ${condominio}\n\n📋 Qual tarefa você quer atualizar? Toque na tarefa abaixo.`,
     {
-      inline_keyboard: tarefas.map((t) => [
-        { text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` },
-      ]),
+      inline_keyboard: tarefas
+        .slice(0, LIMITE_BOTOES_TAREFA)
+        .map((t) => [{ text: truncar(t.titulo, 60), callback_data: `tarefa:${t.id}` }]),
     },
   );
 }
@@ -2233,7 +2402,7 @@ async function tratarCallbackQuery(callbackQuery: {
           pendenteAtualizar.textoAtualizacao ?? null,
         );
       } else {
-        await iniciarEscolhaTarefa(chatId, condominio, databaseId, chave);
+        await iniciarEscolhaResponsavelAtualizar(chatId, condominio, databaseId, chave);
       }
     }
     return;
@@ -2242,6 +2411,28 @@ async function tratarCallbackQuery(callbackQuery: {
   const linhaSessao = await buscarLinhaSessao(chatId);
   const sessao = linhaSessao?.sessao;
   if (!sessao) return;
+
+  if (
+    data.startsWith("respatualizar:") &&
+    sessao.fluxo === "atualizar" &&
+    sessao.step === "responsavel"
+  ) {
+    const resto = data.slice("respatualizar:".length);
+    let filtro: { tipo: "id" | "nome"; valor: string } | undefined;
+    if (resto.startsWith("id:")) filtro = { tipo: "id", valor: resto.slice("id:".length) };
+    else if (resto.startsWith("nome:"))
+      filtro = { tipo: "nome", valor: resto.slice("nome:".length) };
+    // "todos" (ou qualquer outro valor inesperado) cai aqui como undefined —
+    // mostra a lista sem filtro de responsável.
+    await iniciarEscolhaTarefa(
+      chatId,
+      sessao.condominio,
+      sessao.databaseId,
+      sessao.statusOptions,
+      filtro,
+    );
+    return;
+  }
 
   if (data.startsWith("prazo:") && sessao.fluxo === "nova" && sessao.step === "prazo") {
     const dias = Number(data.slice("prazo:".length));
@@ -2334,7 +2525,7 @@ async function tratarCallbackQuery(callbackQuery: {
     await salvarSessao(chatId, nova);
     await responderTelegram(
       chatId,
-      "✏️ Descreva a última atualização em uma mensagem de texto (o que foi feito, próximos passos, etc.).",
+      "✏️ Descreva a última atualização (o que foi feito, próximos passos, etc.) — pode ser em texto ou em um áudio.",
     );
     return;
   }
@@ -2425,37 +2616,7 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
   }
 
   if (sessao.fluxo === "atualizar" && sessao.step === "texto") {
-    if (sessao.viaAudio) {
-      // Veio de áudio (status já resolvido antes de chegar aqui) — confirma
-      // antes de gravar, em vez de aplicar direto como no fluxo manual.
-      const confirmando: SessaoAtualizarTarefa = {
-        ...sessao,
-        step: "confirmar_audio",
-        textoPendente: texto,
-      };
-      await salvarSessao(chatId, confirmando);
-      await responderTelegram(
-        chatId,
-        resumoConfirmacaoAtualizacao(confirmando),
-        BOTOES_CONFIRMAR_AUDIO,
-      );
-      return;
-    }
-    await atualizarTarefa(sessao.pageId!, sessao.novoStatus, texto);
-    const nova: SessaoAtualizarTarefa = { ...sessao, step: "anexo" };
-    await salvarSessao(chatId, nova);
-    await responderTelegram(
-      chatId,
-      "📎 Quer anexar foto, vídeo ou documento a esta tarefa? Toque em Sim ou Não.",
-      {
-        inline_keyboard: [
-          [
-            { text: "Sim", callback_data: "anexar:sim" },
-            { text: "Não", callback_data: "anexar:nao" },
-          ],
-        ],
-      },
-    );
+    await processarTextoAtualizacao(chatId, sessao, texto);
     return;
   }
 
@@ -2519,14 +2680,17 @@ export const Route = createFileRoute("/webhooks/telegram")({
               mimeType: message.document.mime_type ?? "application/octet-stream",
             });
           } else if (chatId && (message?.voice || message?.audio)) {
-            // Áudio serve dois propósitos diferentes dependendo do momento:
-            // anexo de uma tarefa (fluxo Atualizar, passo "recebendo_anexo")
-            // ou criação de tarefa nova por voz (qualquer outro momento) — só
-            // dá pra saber qual é olhando a sessão em andamento.
+            // Áudio serve três propósitos diferentes dependendo do momento:
+            // anexo de uma tarefa (fluxo Atualizar, passo "recebendo_anexo"),
+            // a própria "última atualização" ditada por voz (fluxo Atualizar,
+            // passo "texto") ou criação de tarefa nova por voz (qualquer
+            // outro momento) — só dá pra saber qual é olhando a sessão.
             const linhaSessao = await buscarLinhaSessao(chatId);
             const emAnexo =
               linhaSessao?.sessao?.fluxo === "atualizar" &&
               linhaSessao.sessao.step === "recebendo_anexo";
+            const emTextoAtualizacao =
+              linhaSessao?.sessao?.fluxo === "atualizar" && linhaSessao.sessao.step === "texto";
 
             if (emAnexo && message.voice) {
               await tratarAnexo(chatId, {
@@ -2540,6 +2704,18 @@ export const Route = createFileRoute("/webhooks/telegram")({
                 nomeSugerido: message.audio.file_name ?? "audio.mp3",
                 mimeType: message.audio.mime_type ?? "audio/mpeg",
               });
+            } else if (emTextoAtualizacao && linhaSessao?.sessao?.fluxo === "atualizar") {
+              if (!groqConfigurado()) {
+                await responderTelegram(
+                  chatId,
+                  "🎙️ Transcrição de áudio não está disponível agora — pode mandar a atualização em texto?",
+                );
+              } else {
+                const fileId = (message.voice ?? message.audio)!.file_id;
+                const bytes = await baixarArquivoTelegram(fileId);
+                const transcricao = await transcreverAudioGroq(bytes);
+                await processarTextoAtualizacao(chatId, linhaSessao.sessao, transcricao);
+              }
             } else {
               const fileId = (message.voice ?? message.audio)!.file_id;
               await tratarAudioTarefa(chatId, fileId);
