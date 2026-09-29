@@ -27,6 +27,9 @@ export const RESPONSAVEIS_DB_ID = "f68f926a514547778301134a960454ea";
 // Responsáveis, ver a relação dupla "Acompanhado por" / "Usuário do bot").
 export const PROP_ACOMPANHO = "Responsáveis que acompanho";
 export const PROP_VINCULADO = "Responsável vinculado";
+// Tarefas que a pessoa acompanha (aviso de cada alteração + atraso). Separada
+// de "Tarefas Acompanhadas", a lista antiga que só avisa atraso.
+export const PROP_EM_ACOMPANHAMENTO = "Tarefas em Acompanhamento";
 const RETRATOS_SHEET_NAME = "_retratos";
 
 // Cada valor guardado no retrato é cortado aqui — uma célula do Sheets
@@ -407,7 +410,7 @@ export type Seguidora = {
   nome: string;
   // Ids (sem traços) de responsáveis que a pessoa acompanha.
   acompanha: string[];
-  // Ids (sem traços) de tarefas específicas que a pessoa acompanha.
+  // Ids (sem traços) das tarefas em acompanhamento (avisa alterações).
   tarefas: Set<string>;
 };
 
@@ -436,11 +439,12 @@ export async function seguidoras(chave: string): Promise<Seguidora[]> {
         .map(textoDaPropriedade)
         .join("");
       const acompanha = (props[PROP_ACOMPANHO]?.relation ?? []).map((r) => semTracos(r.id));
-      // "Tarefas Acompanhadas": JSON [{ condominio, pageId, titulo }] em texto
-      // (ver webhooks/telegram.ts).
+      // "Tarefas em Acompanhamento": JSON [{ condominio, pageId, titulo }] em
+      // texto (ver webhooks/telegram.ts). A lista antiga ("Tarefas
+      // Acompanhadas") é só de atraso e não gera aviso de alteração.
       let tarefas = new Set<string>();
       try {
-        const bruto = textoDaPropriedade(props["Tarefas Acompanhadas"] ?? { type: "" });
+        const bruto = textoDaPropriedade(props[PROP_EM_ACOMPANHAMENTO] ?? { type: "" });
         const lido = bruto ? (JSON.parse(bruto) as { pageId?: string }[]) : [];
         tarefas = new Set(lido.map((t) => semTracos(t.pageId ?? "")).filter(Boolean));
       } catch {

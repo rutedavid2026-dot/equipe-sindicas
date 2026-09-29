@@ -3,6 +3,7 @@ import { isFechada, normalizeForMatch, splitLista } from "@/lib/report-utils";
 import { CONDOMINIOS, NOMES_CONDOMINIOS } from "@/lib/condominios-notion";
 import {
   PROP_ACOMPANHO,
+  PROP_EM_ACOMPANHAMENTO,
   PROP_VINCULADO,
   listarResponsaveis,
   normalizar,
@@ -339,7 +340,10 @@ type PessoaTelegram = {
   // Linha do banco que é a própria pessoa ("Sou eu"), quando informada.
   responsavelVinculado?: string;
   condominiosMonitorados: Set<string>;
+  // Lista antiga: só aviso de atraso.
   tarefasAcompanhadas: TarefaSeguida[];
+  // Lista nova: aviso de cada alteração + atraso ("Acompanhar essa tarefa").
+  tarefasEmAcompanhamento: TarefaSeguida[];
 };
 
 async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | null> {
@@ -375,17 +379,17 @@ async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | nu
       .join("")
       .trim() ?? "";
 
-  const tarefasTexto = (page.properties["Tarefas Acompanhadas"]?.rich_text ?? [])
-    .map((t) => t.plain_text)
-    .join("");
-  let tarefasAcompanhadas: TarefaSeguida[] = [];
-  if (tarefasTexto) {
+  const lerTarefas = (nomeProp: string): TarefaSeguida[] => {
+    const texto = (page.properties[nomeProp]?.rich_text ?? []).map((t) => t.plain_text).join("");
+    if (!texto) return [];
     try {
-      tarefasAcompanhadas = JSON.parse(tarefasTexto) as TarefaSeguida[];
+      return JSON.parse(texto) as TarefaSeguida[];
     } catch {
-      tarefasAcompanhadas = [];
+      return [];
     }
-  }
+  };
+  const tarefasAcompanhadas = lerTarefas("Tarefas Acompanhadas");
+  const tarefasEmAcompanhamento = lerTarefas(PROP_EM_ACOMPANHAMENTO);
 
   return {
     pageId: page.id,
@@ -401,6 +405,7 @@ async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | nu
       (page.properties["Condominios"]?.multi_select ?? []).map((o) => o.name),
     ),
     tarefasAcompanhadas,
+    tarefasEmAcompanhamento,
   };
 }
 
@@ -423,6 +428,7 @@ async function salvarConfigAlertas(
     alertasAtivos?: boolean;
     condominiosMonitorados?: Set<string>;
     tarefasAcompanhadas?: TarefaSeguida[];
+    tarefasEmAcompanhamento?: TarefaSeguida[];
   },
 ): Promise<void> {
   const properties: Record<string, unknown> = {};
@@ -442,6 +448,11 @@ async function salvarConfigAlertas(
   if (patch.condominiosMonitorados) {
     properties["Condominios"] = {
       multi_select: [...patch.condominiosMonitorados].map((name) => ({ name })),
+    };
+  }
+  if (patch.tarefasEmAcompanhamento) {
+    properties[PROP_EM_ACOMPANHAMENTO] = {
+      rich_text: paraBlocosRichText(JSON.stringify(patch.tarefasEmAcompanhamento)),
     };
   }
   if (patch.tarefasAcompanhadas) {
@@ -467,8 +478,8 @@ function textoMenuAlertas(pessoa: PessoaTelegram): string {
     "⚙️ Configurar Alertas\n\n" +
     `⏰ Tarefas atrasadas: ${geral}\n` +
     `🏢 Condomínios monitorados: ${pessoa.condominiosMonitorados.size}\n` +
-    `🎯 Tarefas específicas seguidas: ${pessoa.tarefasAcompanhadas.length}\n\n` +
-    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio). Nas tarefas específicas que você acompanha, também recebe um aviso a cada alteração.\n\n" +
+    `🎯 Tarefas específicas seguidas: ${new Set([...pessoa.tarefasAcompanhadas, ...pessoa.tarefasEmAcompanhamento].map((t) => semTracos(t.pageId))).size}\n\n` +
+    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio). Nas tarefas marcadas com ✅ (acompanhando), você também recebe um aviso a cada alteração; as marcadas com ⏰ só avisam quando atrasam.\n\n" +
     `👥 Responsáveis acompanhados: ${pessoa.responsaveisAcompanhados.length}\n` +
     "Você recebe um aviso a cada alteração nas tarefas dos responsáveis que escolher (o que mudou, quando e de qual condomínio)."
   );
@@ -669,11 +680,14 @@ async function mostrarChecklistTarefas(
   const totalPaginas = Math.max(1, Math.ceil(lista.length / TAREFAS_POR_PAGINA));
   const atual = Math.min(Math.max(0, opcoes.pagina ?? 0), totalPaginas - 1);
   const visiveis = lista.slice(atual * TAREFAS_POR_PAGINA, (atual + 1) * TAREFAS_POR_PAGINA);
-  const seguidas = new Set(pessoa.tarefasAcompanhadas.map((t) => semTracos(t.pageId)));
+  const seguidas = new Set(pessoa.tarefasEmAcompanhamento.map((t) => semTracos(t.pageId)));
+  const soAtraso = new Set(pessoa.tarefasAcompanhadas.map((t) => semTracos(t.pageId)));
+  const marca = (id: string) =>
+    seguidas.has(semTracos(id)) ? "✅" : soAtraso.has(semTracos(id)) ? "⏰" : "⬜";
 
   const teclado: ReplyMarkup["inline_keyboard"] = visiveis.map((t) => [
     {
-      text: `${seguidas.has(semTracos(t.id)) ? "✅" : "⬜"} ${truncar(t.titulo, 50)}`,
+      text: `${marca(t.id)} ${truncar(t.titulo, 50)}`,
       callback_data: `alertatarefa:${t.id}:${atual}`,
     },
   ]);
@@ -694,7 +708,7 @@ async function mostrarChecklistTarefas(
   teclado.push([{ text: "💾 Salvar e voltar", callback_data: "alertasvoltar" }]);
 
   const partes = [
-    `🎯 ${nome} — toque numa tarefa para acompanhá-la (ou deixar de acompanhar). Você recebe um aviso a cada alteração nela e quando ela atrasar.`,
+    `🎯 ${nome} — toque numa tarefa para acompanhá-la (✅: avisa cada alteração e o atraso). ⏰ = só avisa quando atrasa (toque para passar a acompanhar). ⬜ = não acompanha.`,
   ];
   if (opcoes.aviso) partes.push(opcoes.aviso);
   if (filtro) {
@@ -2489,26 +2503,35 @@ async function tratarCallbackQuery(callbackQuery: {
     if (!chave || !pessoa || !pageId) return;
     const nomeCondo = NOMES_CONDOMINIOS[chave];
 
-    const jaSegue = pessoa.tarefasAcompanhadas.find(
-      (t) => semTracos(t.pageId) === semTracos(pageId),
-    );
-    let novaLista: TarefaSeguida[];
+    const mesma = (t: TarefaSeguida) => semTracos(t.pageId) === semTracos(pageId);
+    const emAcompanhamento = pessoa.tarefasEmAcompanhamento.find(mesma);
+    const soAtraso = pessoa.tarefasAcompanhadas.find(mesma);
     let aviso: string;
-    if (jaSegue) {
-      novaLista = pessoa.tarefasAcompanhadas.filter(
-        (t) => semTracos(t.pageId) !== semTracos(pageId),
-      );
-      aviso = `🛑 Você deixou de acompanhar: ${jaSegue.titulo}`;
+    if (emAcompanhamento) {
+      // Deixa de acompanhar de vez: sai das duas listas.
+      await salvarConfigAlertas(pessoa.pageId, {
+        tarefasEmAcompanhamento: pessoa.tarefasEmAcompanhamento.filter((t) => !mesma(t)),
+        ...(soAtraso
+          ? { tarefasAcompanhadas: pessoa.tarefasAcompanhadas.filter((t) => !mesma(t)) }
+          : {}),
+      });
+      aviso = `🛑 Você deixou de acompanhar: ${emAcompanhamento.titulo}`;
     } else {
       const tarefa = await dadosDaTarefa(pageId);
       if (!tarefa) return;
-      novaLista = [
-        ...pessoa.tarefasAcompanhadas,
-        { condominio: nomeCondo, pageId: tarefa.id, titulo: truncar(tarefa.titulo, 60) },
-      ];
+      // Passa a acompanhar (alterações + atraso); se estava só na lista de
+      // atraso, migra pra lista nova pra não ficar duplicada.
+      await salvarConfigAlertas(pessoa.pageId, {
+        tarefasEmAcompanhamento: [
+          ...pessoa.tarefasEmAcompanhamento,
+          { condominio: nomeCondo, pageId: tarefa.id, titulo: truncar(tarefa.titulo, 60) },
+        ],
+        ...(soAtraso
+          ? { tarefasAcompanhadas: pessoa.tarefasAcompanhadas.filter((t) => !mesma(t)) }
+          : {}),
+      });
       aviso = `✅ Agora você está acompanhando: ${tarefa.titulo}`;
     }
-    await salvarConfigAlertas(pessoa.pageId, { tarefasAcompanhadas: novaLista });
     await mostrarChecklistTarefas(chatId, messageId, chave, {
       pagina: Number(paginaTxt) || 0,
       filtro: await filtroTarefaAtual(chatId),
@@ -2547,9 +2570,9 @@ async function tratarCallbackQuery(callbackQuery: {
     if (!(await garantirCadastro(chatId, null))) return;
     const pessoa = await buscarPessoaTelegram(chatId);
     if (!pessoa || !pageId) return;
-    const existente = pessoa.tarefasAcompanhadas.find(
-      (t) => semTracos(t.pageId) === semTracos(pageId),
-    );
+    const mesma = (t: TarefaSeguida) => semTracos(t.pageId) === semTracos(pageId);
+    const existente = pessoa.tarefasEmAcompanhamento.find(mesma);
+    const antiga = pessoa.tarefasAcompanhadas.find(mesma);
     const teclado = (id: string): ReplyMarkup => ({
       inline_keyboard: [
         [{ text: "🛑 Deixar de acompanhar", callback_data: `unseg:${semTracos(id)}` }],
@@ -2558,14 +2581,19 @@ async function tratarCallbackQuery(callbackQuery: {
     });
 
     if (!seguir) {
-      if (existente) {
+      if (existente || antiga) {
         await salvarConfigAlertas(pessoa.pageId, {
-          tarefasAcompanhadas: pessoa.tarefasAcompanhadas.filter((t) => t !== existente),
+          ...(existente
+            ? { tarefasEmAcompanhamento: pessoa.tarefasEmAcompanhamento.filter((t) => !mesma(t)) }
+            : {}),
+          ...(antiga
+            ? { tarefasAcompanhadas: pessoa.tarefasAcompanhadas.filter((t) => !mesma(t)) }
+            : {}),
         });
       }
       await responderTelegram(
         chatId,
-        `🛑 Você deixou de acompanhar: ${existente?.titulo ?? "a tarefa"}`,
+        `🛑 Você deixou de acompanhar: ${(existente ?? antiga)?.titulo ?? "a tarefa"}`,
         MENU_PRINCIPAL,
       );
       return;
@@ -2584,14 +2612,18 @@ async function tratarCallbackQuery(callbackQuery: {
       return;
     }
     await salvarConfigAlertas(pessoa.pageId, {
-      tarefasAcompanhadas: [
-        ...pessoa.tarefasAcompanhadas,
+      tarefasEmAcompanhamento: [
+        ...pessoa.tarefasEmAcompanhamento,
         {
           condominio: tarefa.condominio,
           pageId: tarefa.id,
           titulo: truncar(tarefa.titulo, 60),
         },
       ],
+      // Se estava só na lista de atraso, migra pra lista nova.
+      ...(antiga
+        ? { tarefasAcompanhadas: pessoa.tarefasAcompanhadas.filter((t) => !mesma(t)) }
+        : {}),
     });
     await responderTelegram(
       chatId,

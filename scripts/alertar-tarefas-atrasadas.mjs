@@ -162,15 +162,18 @@ async function buscarPessoasComAlerta() {
       const condominios = new Set(
         (page.properties["Condominios"]?.multi_select ?? []).map((o) => o.name),
       );
-      const tarefasTexto = (page.properties["Tarefas Acompanhadas"]?.rich_text ?? [])
-        .map((t) => t.plain_text)
-        .join("");
-      let tarefasSeguidas = [];
-      if (tarefasTexto) {
+      // Duas listas de tarefas seguidas: "Tarefas Acompanhadas" (só aviso de
+      // atraso, a lista antiga) e "Tarefas em Acompanhamento" (aviso de cada
+      // alteração + atraso, gravada pelo botão "Acompanhar essa tarefa" do
+      // bot). Pra atraso, as duas contam.
+      const tarefasSeguidas = [];
+      for (const nomeProp of ["Tarefas Acompanhadas", "Tarefas em Acompanhamento"]) {
+        const texto = (page.properties[nomeProp]?.rich_text ?? []).map((t) => t.plain_text).join("");
+        if (!texto) continue;
         try {
-          tarefasSeguidas = JSON.parse(tarefasTexto);
+          tarefasSeguidas.push(...JSON.parse(texto));
         } catch {
-          tarefasSeguidas = [];
+          // texto inválido: ignora só essa lista
         }
       }
       pessoas.push({
