@@ -402,7 +402,14 @@ export async function atualizarCondominiosResponsavel(
 // Quem acompanha quem (base "Telegram")
 // ---------------------------------------------------------------------------
 
-export type Seguidora = { chatId: number; nome: string; acompanha: string[] };
+export type Seguidora = {
+  chatId: number;
+  nome: string;
+  // Ids (sem traços) de responsáveis que a pessoa acompanha.
+  acompanha: string[];
+  // Ids (sem traços) de tarefas específicas que a pessoa acompanha.
+  tarefas: Set<string>;
+};
 
 export async function seguidoras(chave: string): Promise<Seguidora[]> {
   const lista: Seguidora[] = [];
@@ -412,11 +419,9 @@ export async function seguidoras(chave: string): Promise<Seguidora[]> {
       method: "POST",
       body: JSON.stringify({
         page_size: 100,
-        filter: { property: PROP_ACOMPANHO, relation: { is_not_empty: true } },
         ...(cursor ? { start_cursor: cursor } : {}),
       }),
     });
-    // 400 = a relação ainda não existe na base; ninguém acompanha ninguém.
     if (!res.ok) return lista;
     const json = (await res.json()) as {
       results: { properties: Record<string, PropNotion> }[];
@@ -431,7 +436,19 @@ export async function seguidoras(chave: string): Promise<Seguidora[]> {
         .map(textoDaPropriedade)
         .join("");
       const acompanha = (props[PROP_ACOMPANHO]?.relation ?? []).map((r) => semTracos(r.id));
-      if (chatId && acompanha.length > 0) lista.push({ chatId, nome, acompanha });
+      // "Tarefas Acompanhadas": JSON [{ condominio, pageId, titulo }] em texto
+      // (ver webhooks/telegram.ts).
+      let tarefas = new Set<string>();
+      try {
+        const bruto = textoDaPropriedade(props["Tarefas Acompanhadas"] ?? { type: "" });
+        const lido = bruto ? (JSON.parse(bruto) as { pageId?: string }[]) : [];
+        tarefas = new Set(lido.map((t) => semTracos(t.pageId ?? "")).filter(Boolean));
+      } catch {
+        // texto inválido: ignora, só perde o acompanhamento de tarefas específicas
+      }
+      if (chatId && (acompanha.length > 0 || tarefas.size > 0)) {
+        lista.push({ chatId, nome, acompanha, tarefas });
+      }
     }
     cursor = json.has_more ? (json.next_cursor ?? undefined) : undefined;
   } while (cursor);
@@ -746,27 +763,30 @@ export async function tratarEventoAlertaResponsavel(args: {
     // então só guarda o retrato pra comparar da próxima vez.
     await anexarRetratos(sheets, [{ pageId, retrato: novo }]);
   }
-  if (semNovidade || !indice || !chaveNotion) return;
+  if (semNovidade || !chaveNotion) return;
   if (criada && novo.titulo === "(sem título)") return;
 
   // Quem é (ou era) responsável: quem foi tirado da tarefa também precisa
   // saber.
-  const envolvidos = resolverResponsaveis(
-    indice,
-    [...novo.responsaveis, ...(anterior?.retrato.responsaveis ?? [])],
-    [...(novo.responsaveisIds ?? []), ...(anterior?.retrato.responsaveisIds ?? [])],
-  ).ids;
-  if (envolvidos.size === 0) return;
+  const envolvidos = indice
+    ? resolverResponsaveis(
+        indice,
+        [...novo.responsaveis, ...(anterior?.retrato.responsaveis ?? [])],
+        [...(novo.responsaveisIds ?? []), ...(anterior?.retrato.responsaveisIds ?? [])],
+      ).ids
+    : new Set<string>();
 
   const todas = await seguidoras(chaveNotion);
   const envolvidosSemTracos = new Set([...envolvidos].map(semTracos));
   const nomePorId = new Map(banco.map((r) => [semTracos(r.id), r.nome]));
+  // Recebe quem acompanha um dos responsáveis da tarefa OU a própria tarefa.
   const destinatarias = todas
     .map((s) => ({
       ...s,
       motivo: s.acompanha.filter((id) => envolvidosSemTracos.has(id)),
+      segueTarefa: s.tarefas.has(semTracos(pageId)),
     }))
-    .filter((s) => s.motivo.length > 0);
+    .filter((s) => s.motivo.length > 0 || s.segueTarefa);
   if (destinatarias.length === 0) return;
 
   const condominio =
@@ -782,7 +802,10 @@ export async function tratarEventoAlertaResponsavel(args: {
       condominio,
       tarefa: novo.titulo,
       responsaveis: novo.responsaveis,
-      acompanha: s.motivo.map((id) => nomePorId.get(id) ?? "").filter(Boolean),
+      acompanha: [
+        ...s.motivo.map((id) => nomePorId.get(id) ?? "").filter(Boolean),
+        ...(s.segueTarefa ? ["esta tarefa"] : []),
+      ],
       quando: Number.isNaN(quando.getTime()) ? new Date() : quando,
       quem,
       tipo: criada && !anterior ? "criada" : "alterada",

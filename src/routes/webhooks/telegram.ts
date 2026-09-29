@@ -116,13 +116,28 @@ type ReplyMarkup = { inline_keyboard: { text: string; callback_data: string }[][
 // início) fica de fora.
 function comBotaoVoltar(replyMarkup?: ReplyMarkup): ReplyMarkup {
   if (!replyMarkup) return MENU_VOLTAR;
-  if (replyMarkup === MENU_PRINCIPAL) return replyMarkup;
+  const ehMenuPrincipal = replyMarkup.inline_keyboard.some((linha) =>
+    linha.some((b) => b.callback_data === "novatarefa"),
+  );
+  if (ehMenuPrincipal) return replyMarkup;
   const jaTem = replyMarkup.inline_keyboard.some((linha) =>
     linha.some((b) => b.callback_data === BOTAO_VOLTAR.callback_data),
   );
   return jaTem
     ? replyMarkup
     : { inline_keyboard: [...replyMarkup.inline_keyboard, [BOTAO_VOLTAR]] };
+}
+
+// Menu principal com "👁 Acompanhar essa tarefa" no topo — mostrado logo depois
+// de criar uma tarefa. O id vai sem traços pra caber nos 64 bytes do
+// callback_data; a tarefa é relida do Notion quando o botão é tocado.
+function tecladoAposCriar(pageId: string): ReplyMarkup {
+  return {
+    inline_keyboard: [
+      [{ text: "👁 Acompanhar essa tarefa", callback_data: `seg:${semTracos(pageId)}` }],
+      ...MENU_PRINCIPAL.inline_keyboard,
+    ],
+  };
 }
 
 async function responderTelegram(
@@ -453,7 +468,7 @@ function textoMenuAlertas(pessoa: PessoaTelegram): string {
     `⏰ Tarefas atrasadas: ${geral}\n` +
     `🏢 Condomínios monitorados: ${pessoa.condominiosMonitorados.size}\n` +
     `🎯 Tarefas específicas seguidas: ${pessoa.tarefasAcompanhadas.length}\n\n` +
-    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio).\n\n" +
+    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio). Nas tarefas específicas que você acompanha, também recebe um aviso a cada alteração.\n\n" +
     `👥 Responsáveis acompanhados: ${pessoa.responsaveisAcompanhados.length}\n` +
     "Você recebe um aviso a cada alteração nas tarefas dos responsáveis que escolher (o que mudou, quando e de qual condomínio)."
   );
@@ -621,36 +636,103 @@ async function mostrarListaResponsaveis(
   else await responderTelegram(chatId, texto, { inline_keyboard: teclado });
 }
 
+const TAREFAS_POR_PAGINA = 10;
+
+async function filtroTarefaAtual(chatId: number): Promise<string> {
+  const linha = await buscarLinhaSessao(chatId);
+  return linha?.sessao?.fluxo === "config_alertas" ? (linha.sessao.filtroTarefa ?? "") : "";
+}
+
+async function chaveTarefasAtual(chatId: number): Promise<string | undefined> {
+  const linha = await buscarLinhaSessao(chatId);
+  return linha?.sessao?.fluxo === "config_alertas" ? linha.sessao.condominioChave : undefined;
+}
+
+// Lista das tarefas em aberto de um condomínio, com páginas e busca; cada
+// toque acompanha/deixa de acompanhar e a própria mensagem é reescrita
+// avisando o que acabou de acontecer (`aviso`).
 async function mostrarChecklistTarefas(
   chatId: number,
-  messageId: number,
+  messageId: number | undefined,
   chave: string,
+  opcoes: { pagina?: number; filtro?: string; aviso?: string } = {},
 ): Promise<void> {
   const pessoa = await buscarPessoaTelegram(chatId);
   const databaseId = CONDOMINIOS[chave];
   if (!pessoa || !databaseId) return;
   const nome = NOMES_CONDOMINIOS[chave];
-  const tarefas = await buscarTarefasAbertas(databaseId);
-  const seguidas = new Set(
-    pessoa.tarefasAcompanhadas.filter((t) => t.condominio === nome).map((t) => t.pageId),
-  );
-  await editarMensagem(
-    chatId,
-    messageId,
-    `🎯 ${nome} — toque para seguir/deixar de seguir uma tarefa específica (independente dos condomínios monitorados).`,
+  const filtro = opcoes.filtro ?? "";
+  const alvo = normalizeForMatch(filtro);
+  const todas = (await buscarTarefasAbertas(databaseId)).filter((t) => t.titulo !== "(sem título)");
+  const lista = alvo ? todas.filter((t) => normalizeForMatch(t.titulo).includes(alvo)) : todas;
+
+  const totalPaginas = Math.max(1, Math.ceil(lista.length / TAREFAS_POR_PAGINA));
+  const atual = Math.min(Math.max(0, opcoes.pagina ?? 0), totalPaginas - 1);
+  const visiveis = lista.slice(atual * TAREFAS_POR_PAGINA, (atual + 1) * TAREFAS_POR_PAGINA);
+  const seguidas = new Set(pessoa.tarefasAcompanhadas.map((t) => semTracos(t.pageId)));
+
+  const teclado: ReplyMarkup["inline_keyboard"] = visiveis.map((t) => [
     {
-      inline_keyboard: [
-        ...tarefas.slice(0, LIMITE_BOTOES_TAREFA).map((t) => [
-          {
-            text: `${seguidas.has(t.id) ? "✅" : "⬜"} ${truncar(t.titulo, 50)}`,
-            callback_data: `alertatarefa:${t.id}`,
-          },
-        ]),
-        [{ text: "🏢 Trocar condomínio", callback_data: "alertatarefas" }],
-        [{ text: "💾 Salvar e voltar", callback_data: "alertasvoltar" }],
-      ],
+      text: `${seguidas.has(semTracos(t.id)) ? "✅" : "⬜"} ${truncar(t.titulo, 50)}`,
+      callback_data: `alertatarefa:${t.id}:${atual}`,
     },
-  );
+  ]);
+  if (totalPaginas > 1) {
+    const nav: { text: string; callback_data: string }[] = [];
+    if (atual > 0) nav.push({ text: "◀ Anterior", callback_data: `atp:${atual - 1}` });
+    nav.push({ text: `${atual + 1}/${totalPaginas}`, callback_data: `atp:${atual}` });
+    if (atual < totalPaginas - 1) {
+      nav.push({ text: "Próxima ▶", callback_data: `atp:${atual + 1}` });
+    }
+    teclado.push(nav);
+  }
+  teclado.push([{ text: "🔎 Buscar tarefa", callback_data: "atbusca" }]);
+  if (filtro) {
+    teclado.push([{ text: "🧹 Limpar busca", callback_data: `alertatarefacondo:${chave}` }]);
+  }
+  teclado.push([{ text: "🏢 Trocar condomínio", callback_data: "alertatarefas" }]);
+  teclado.push([{ text: "💾 Salvar e voltar", callback_data: "alertasvoltar" }]);
+
+  const partes = [
+    `🎯 ${nome} — toque numa tarefa para acompanhá-la (ou deixar de acompanhar). Você recebe um aviso a cada alteração nela e quando ela atrasar.`,
+  ];
+  if (opcoes.aviso) partes.push(opcoes.aviso);
+  if (filtro) {
+    partes.push(
+      lista.length
+        ? `🔎 Busca: "${filtro}" (${lista.length})`
+        : `🔎 Nenhuma tarefa encontrada para "${filtro}".`,
+    );
+  }
+  const texto = partes.join("\n\n");
+  if (messageId) await editarMensagem(chatId, messageId, texto, { inline_keyboard: teclado });
+  else await responderTelegram(chatId, texto, { inline_keyboard: teclado });
+}
+
+// Dados de uma tarefa a partir do id da página — usado pelo botão "Acompanhar
+// essa tarefa" (que só carrega o id) e pela lista, que assim funciona também
+// pra tarefa recém-criada que ainda não apareceu na consulta da base.
+async function dadosDaTarefa(
+  pageId: string,
+): Promise<{ id: string; titulo: string; condominio: string } | null> {
+  try {
+    const pagina = (await notionFetch(`pages/${pageId}`)) as {
+      id: string;
+      parent?: { database_id?: string };
+      properties: Record<string, { type?: string; title?: { plain_text: string }[] }>;
+    };
+    const titulo =
+      Object.values(pagina.properties)
+        .find((p) => p.type === "title")
+        ?.title?.map((t) => t.plain_text)
+        .join("")
+        .trim() || "(sem título)";
+    const bancoId = semTracos(pagina.parent?.database_id ?? "");
+    const chave = Object.entries(CONDOMINIOS).find(([, db]) => semTracos(db) === bancoId)?.[0];
+    return { id: pagina.id, titulo, condominio: chave ? NOMES_CONDOMINIOS[chave] : "" };
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -848,10 +930,19 @@ type SessaoIndefinidaPendente = {
 // condomínio veio a lista de tarefas sendo marcada/desmarcada.
 type SessaoConfigAlertas = {
   fluxo: "config_alertas";
-  step: "menu" | "condominios" | "tarefas" | "tarefas_condo" | "responsaveis" | "busca_resp";
+  step:
+    | "menu"
+    | "condominios"
+    | "tarefas"
+    | "tarefas_condo"
+    | "busca_tarefa"
+    | "responsaveis"
+    | "busca_resp";
   condominioChave?: string;
   // Texto digitado em "🔎 Buscar responsável" (lista filtrada).
   filtroResp?: string;
+  // Idem, na lista de tarefas de um condomínio.
+  filtroTarefa?: string;
 };
 
 type Sessao =
@@ -964,7 +1055,7 @@ async function criarTarefa({
   prioridadeTipo,
   setor,
   setorTipo,
-}: CriarTarefaInput): Promise<string> {
+}: CriarTarefaInput): Promise<{ url: string; id: string }> {
   // databaseId já vem resolvido do fluxo de botões (evita depender de
   // round-trip por nome, que falha pra condomínios cuja grafia real no Notion
   // diverge da chave — ex.: "Saint Exupery" sem acento); só a camada 1
@@ -995,9 +1086,9 @@ async function criarTarefa({
   const pagina = (await notionFetch("pages", {
     method: "POST",
     body: JSON.stringify({ parent: { database_id: databaseId }, properties }),
-  })) as { url: string };
+  })) as { url: string; id: string };
 
-  return pagina.url;
+  return { url: pagina.url, id: pagina.id };
 }
 
 async function atualizarTarefa(
@@ -1416,7 +1507,7 @@ async function continuarNovaTarefa(
   }
 
   await limparSessao(chatId);
-  const url = await criarTarefa({
+  const criada = await criarTarefa({
     condominio: sessao.condominio,
     tarefa: sessao.tarefa!,
     dias: sessao.dias!,
@@ -1431,8 +1522,8 @@ async function continuarNovaTarefa(
   });
   await responderTelegram(
     chatId,
-    `${resumoTarefaCriada(sessao, sessao.prioridade, sessao.setor, url)}\n\nPrecisa de mais alguma coisa? Toque em um botão ou mande um áudio.`,
-    MENU_PRINCIPAL,
+    `${resumoTarefaCriada(sessao, sessao.prioridade, sessao.setor, criada.url)}\n\nPrecisa de mais alguma coisa? Toque em um botão ou mande um áudio.`,
+    tecladoAposCriar(criada.id),
   );
 }
 
@@ -1776,7 +1867,9 @@ async function buscarTarefasAbertas(databaseId: string): Promise<TarefaAberta[]>
 
     for (const p of json.results) {
       const status = p.properties["Status"]?.status?.name;
-      if (!status || isFechada(status)) continue;
+      // Tarefa sem Status preenchido também é tarefa em aberto (antes era
+      // descartada e sumia das listas, inclusive a recém-criada por fora do bot).
+      if (status && isFechada(status)) continue;
 
       const responsavelProp = p.properties["Responsável"];
       const responsavelNomes: string[] = [];
@@ -2390,32 +2483,121 @@ async function tratarCallbackQuery(callbackQuery: {
   }
 
   if (data.startsWith("alertatarefa:") && messageId) {
-    const pageId = data.slice("alertatarefa:".length);
-    const linhaAtual = await buscarLinhaSessao(chatId);
-    const chave =
-      linhaAtual?.sessao?.fluxo === "config_alertas"
-        ? linhaAtual.sessao.condominioChave
-        : undefined;
-    const databaseId = chave ? CONDOMINIOS[chave] : undefined;
+    const [, pageId, paginaTxt] = data.split(":");
+    const chave = await chaveTarefasAtual(chatId);
     const pessoa = chave ? await buscarPessoaTelegram(chatId) : null;
-    if (!chave || !databaseId || !pessoa) return;
+    if (!chave || !pessoa || !pageId) return;
     const nomeCondo = NOMES_CONDOMINIOS[chave];
 
-    const jaSegue = pessoa.tarefasAcompanhadas.some((t) => t.pageId === pageId);
+    const jaSegue = pessoa.tarefasAcompanhadas.find(
+      (t) => semTracos(t.pageId) === semTracos(pageId),
+    );
     let novaLista: TarefaSeguida[];
+    let aviso: string;
     if (jaSegue) {
-      novaLista = pessoa.tarefasAcompanhadas.filter((t) => t.pageId !== pageId);
+      novaLista = pessoa.tarefasAcompanhadas.filter(
+        (t) => semTracos(t.pageId) !== semTracos(pageId),
+      );
+      aviso = `🛑 Você deixou de acompanhar: ${jaSegue.titulo}`;
     } else {
-      const tarefas = await buscarTarefasAbertas(databaseId);
-      const tarefa = tarefas.find((t) => t.id === pageId);
+      const tarefa = await dadosDaTarefa(pageId);
       if (!tarefa) return;
       novaLista = [
         ...pessoa.tarefasAcompanhadas,
-        { condominio: nomeCondo, pageId, titulo: truncar(tarefa.titulo, 60) },
+        { condominio: nomeCondo, pageId: tarefa.id, titulo: truncar(tarefa.titulo, 60) },
       ];
+      aviso = `✅ Agora você está acompanhando: ${tarefa.titulo}`;
     }
     await salvarConfigAlertas(pessoa.pageId, { tarefasAcompanhadas: novaLista });
-    await mostrarChecklistTarefas(chatId, messageId, chave);
+    await mostrarChecklistTarefas(chatId, messageId, chave, {
+      pagina: Number(paginaTxt) || 0,
+      filtro: await filtroTarefaAtual(chatId),
+      aviso,
+    });
+    return;
+  }
+
+  if (data.startsWith("atp:") && messageId) {
+    const chave = await chaveTarefasAtual(chatId);
+    if (!chave) return;
+    await mostrarChecklistTarefas(chatId, messageId, chave, {
+      pagina: Number(data.slice(4)) || 0,
+      filtro: await filtroTarefaAtual(chatId),
+    });
+    return;
+  }
+
+  if (data === "atbusca") {
+    const chave = await chaveTarefasAtual(chatId);
+    if (!chave) return;
+    await salvarSessao(chatId, {
+      fluxo: "config_alertas",
+      step: "busca_tarefa",
+      condominioChave: chave,
+    });
+    await responderTelegram(chatId, "🔎 Digite parte do nome da tarefa. Ex.: elevador");
+    return;
+  }
+
+  // Botão "👁 Acompanhar essa tarefa" (logo depois de criar) e o
+  // "🛑 Deixar de acompanhar" da confirmação.
+  if (data.startsWith("seg:") || data.startsWith("unseg:")) {
+    const seguir = data.startsWith("seg:");
+    const pageId = data.slice(data.indexOf(":") + 1);
+    if (!(await garantirCadastro(chatId, null))) return;
+    const pessoa = await buscarPessoaTelegram(chatId);
+    if (!pessoa || !pageId) return;
+    const existente = pessoa.tarefasAcompanhadas.find(
+      (t) => semTracos(t.pageId) === semTracos(pageId),
+    );
+    const teclado = (id: string): ReplyMarkup => ({
+      inline_keyboard: [
+        [{ text: "🛑 Deixar de acompanhar", callback_data: `unseg:${semTracos(id)}` }],
+        ...MENU_PRINCIPAL.inline_keyboard,
+      ],
+    });
+
+    if (!seguir) {
+      if (existente) {
+        await salvarConfigAlertas(pessoa.pageId, {
+          tarefasAcompanhadas: pessoa.tarefasAcompanhadas.filter((t) => t !== existente),
+        });
+      }
+      await responderTelegram(
+        chatId,
+        `🛑 Você deixou de acompanhar: ${existente?.titulo ?? "a tarefa"}`,
+        MENU_PRINCIPAL,
+      );
+      return;
+    }
+    if (existente) {
+      await responderTelegram(
+        chatId,
+        `👁 Você já acompanha esta tarefa:\n📋 ${existente.titulo}\n🏢 ${existente.condominio}`,
+        teclado(existente.pageId),
+      );
+      return;
+    }
+    const tarefa = await dadosDaTarefa(pageId);
+    if (!tarefa) {
+      await responderTelegram(chatId, "Não consegui encontrar essa tarefa no Notion.");
+      return;
+    }
+    await salvarConfigAlertas(pessoa.pageId, {
+      tarefasAcompanhadas: [
+        ...pessoa.tarefasAcompanhadas,
+        {
+          condominio: tarefa.condominio,
+          pageId: tarefa.id,
+          titulo: truncar(tarefa.titulo, 60),
+        },
+      ],
+    });
+    await responderTelegram(
+      chatId,
+      `👁 Agora você está acompanhando esta tarefa:\n📋 ${tarefa.titulo}\n🏢 ${tarefa.condominio}\n\nVocê recebe um aviso a cada alteração nela e quando ela atrasar.`,
+      teclado(tarefa.id),
+    );
     return;
   }
 
@@ -2717,11 +2899,11 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
       await responderTelegram(chatId, comando.erro);
       return;
     }
-    const url = await criarTarefa(comando);
+    const criada = await criarTarefa(comando);
     await responderTelegram(
       chatId,
-      `✅ Tarefa criada: ${comando.tarefa}\n🏢 ${comando.condominio}\n📅 Previsão: ${comando.dias} dia(s)\n\n🔗 ${url}`,
-      MENU_PRINCIPAL,
+      `✅ Tarefa criada: ${comando.tarefa}\n🏢 ${comando.condominio}\n📅 Previsão: ${comando.dias} dia(s)\n\n🔗 ${criada.url}`,
+      tecladoAposCriar(criada.id),
     );
     return;
   }
@@ -2760,6 +2942,23 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
 
   if (sessao.fluxo === "atualizar" && sessao.step === "texto") {
     await processarTextoAtualizacao(chatId, sessao, texto);
+    return;
+  }
+
+  if (sessao.fluxo === "config_alertas" && sessao.step === "busca_tarefa") {
+    const chave = sessao.condominioChave;
+    if (!chave || !CONDOMINIOS[chave]) {
+      await mostrarMenuInicial(chatId);
+      return;
+    }
+    const filtro = texto.trim();
+    await salvarSessao(chatId, {
+      fluxo: "config_alertas",
+      step: "tarefas_condo",
+      condominioChave: chave,
+      filtroTarefa: filtro,
+    });
+    await mostrarChecklistTarefas(chatId, undefined, chave, { filtro });
     return;
   }
 
