@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { tratarEventoAlertaResponsavel } from "@/lib/alerta-responsavel";
 
 // Recebe eventos do webhook de integração do Notion (qualquer mudança em
 // qualquer database/página compartilhada com a integração "relatorio-semanal"
@@ -480,6 +481,19 @@ export const Route = createFileRoute("/webhooks/notion")({
         }
 
         const sheetsToken = serviceAccount ? await getAccessToken(serviceAccount) : null;
+
+        // Avisa no Telegram quem é responsável pela tarefa que mudou (opção
+        // "Alertar nas tarefas que sou responsável" em Configurar Alertas).
+        // Best-effort: falha aqui nunca impede a captura abaixo.
+        try {
+          await tratarEventoAlertaResponsavel({
+            evento: json as Parameters<typeof tratarEventoAlertaResponsavel>[0]["evento"],
+            tokensNotion: getNotionTokens(),
+            sheets: sheetsToken ? { token: sheetsToken, spreadsheetId } : null,
+          });
+        } catch (err) {
+          console.warn("Notion webhook: falha no alerta de tarefa do responsável:", err);
+        }
 
         // Resolve qual condomínio mudou, pra reprocessar só ele em vez dos 29
         // — best-effort: qualquer falha aqui (evento de tipo não mapeado,

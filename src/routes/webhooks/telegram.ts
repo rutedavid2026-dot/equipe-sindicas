@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { isFechada, normalizeForMatch, splitLista } from "@/lib/report-utils";
+import { PROP_ALERTAR_MINHAS, PROP_NOMES_RESPONSAVEL } from "@/lib/alerta-responsavel";
 
 // Recebe mensagens do bot do Telegram (@equipesindicas_bot) e permite criar e
 // atualizar tarefas direto pelo chat, sem abrir o Notion.
@@ -379,7 +380,14 @@ type TarefaSeguida = { condominio: string; pageId: string; titulo: string };
 
 type PessoaTelegram = {
   pageId: string;
+  // Nome cadastrado no bot (título da página na base "Telegram").
+  nome: string;
   alertasAtivos: boolean;
+  // "Alertar nas tarefas que sou responsável": avisa cada alteração (o que
+  // mudou, quando, condomínio) nas tarefas em que um dos nomes abaixo é o
+  // Responsável. Enviado pelo webhook do Notion (src/lib/alerta-responsavel.ts).
+  alertarMinhasTarefas: boolean;
+  nomesResponsavel: string[];
   condominiosMonitorados: Set<string>;
   tarefasAcompanhadas: TarefaSeguida[];
 };
@@ -399,6 +407,8 @@ async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | nu
           checkbox?: boolean;
           multi_select?: { name: string }[];
           rich_text?: { plain_text: string }[];
+          title?: { plain_text: string }[];
+          type?: string;
         }
       >;
     }[];
@@ -406,6 +416,16 @@ async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | nu
 
   const page = json.results[0];
   if (!page) return null;
+
+  const nome =
+    Object.values(page.properties)
+      .find((p) => p.type === "title")
+      ?.title?.map((t) => t.plain_text)
+      .join("")
+      .trim() ?? "";
+  const nomesResponsavel = splitLista(
+    (page.properties[PROP_NOMES_RESPONSAVEL]?.rich_text ?? []).map((t) => t.plain_text).join(""),
+  );
 
   const tarefasTexto = (page.properties["Tarefas Acompanhadas"]?.rich_text ?? [])
     .map((t) => t.plain_text)
@@ -421,7 +441,10 @@ async function buscarPessoaTelegram(chatId: number): Promise<PessoaTelegram | nu
 
   return {
     pageId: page.id,
+    nome,
     alertasAtivos: page.properties["Alertas Ativos"]?.checkbox === true,
+    alertarMinhasTarefas: page.properties[PROP_ALERTAR_MINHAS]?.checkbox === true,
+    nomesResponsavel,
     condominiosMonitorados: new Set(
       (page.properties["Condominios"]?.multi_select ?? []).map((o) => o.name),
     ),
@@ -440,15 +463,46 @@ function paraBlocosRichText(texto: string): { text: { content: string } }[] {
   return blocos.length > 0 ? blocos : [{ text: { content: "" } }];
 }
 
+// As duas propriedades do alerta "minhas tarefas" não existiam na base
+// "Telegram" quando ela foi criada — cria na primeira vez que alguém mexe
+// nessa opção, em vez de exigir que alguém adicione as colunas à mão no
+// Notion. Idempotente: só altera o schema se faltar alguma.
+async function garantirPropriedadesAlertaMinhas(): Promise<void> {
+  const db = (await notionFetch(`databases/${TELEGRAM_DB_ID}`)) as {
+    properties: Record<string, { type: string }>;
+  };
+  const faltando: Record<string, unknown> = {};
+  if (!db.properties[PROP_ALERTAR_MINHAS]) faltando[PROP_ALERTAR_MINHAS] = { checkbox: {} };
+  if (!db.properties[PROP_NOMES_RESPONSAVEL]) faltando[PROP_NOMES_RESPONSAVEL] = { rich_text: {} };
+  if (Object.keys(faltando).length === 0) return;
+  await notionFetch(`databases/${TELEGRAM_DB_ID}`, {
+    method: "PATCH",
+    body: JSON.stringify({ properties: faltando }),
+  });
+}
+
 async function salvarConfigAlertas(
   pageId: string,
   patch: {
+    alertarMinhasTarefas?: boolean;
+    nomesResponsavel?: string[];
     alertasAtivos?: boolean;
     condominiosMonitorados?: Set<string>;
     tarefasAcompanhadas?: TarefaSeguida[];
   },
 ): Promise<void> {
   const properties: Record<string, unknown> = {};
+  if (patch.alertarMinhasTarefas !== undefined || patch.nomesResponsavel) {
+    await garantirPropriedadesAlertaMinhas();
+  }
+  if (patch.alertarMinhasTarefas !== undefined) {
+    properties[PROP_ALERTAR_MINHAS] = { checkbox: patch.alertarMinhasTarefas };
+  }
+  if (patch.nomesResponsavel) {
+    properties[PROP_NOMES_RESPONSAVEL] = {
+      rich_text: paraBlocosRichText(patch.nomesResponsavel.join(", ")),
+    };
+  }
   if (patch.alertasAtivos !== undefined) {
     properties["Alertas Ativos"] = { checkbox: patch.alertasAtivos };
   }
@@ -477,11 +531,14 @@ function chavesCondominiosOrdenadas(): string[] {
 function textoMenuAlertas(pessoa: PessoaTelegram): string {
   const geral = pessoa.alertasAtivos ? "🔔 Ativado" : "🔕 Desativado";
   return (
-    "⚙️ Configurar Alertas de Tarefas Atrasadas\n\n" +
-    `Status geral: ${geral}\n` +
+    "⚙️ Configurar Alertas\n\n" +
+    `⏰ Tarefas atrasadas: ${geral}\n` +
     `🏢 Condomínios monitorados: ${pessoa.condominiosMonitorados.size}\n` +
     `🎯 Tarefas específicas seguidas: ${pessoa.tarefasAcompanhadas.length}\n\n` +
-    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio)."
+    "Você é avisada quando uma tarefa atrasa se ela for de um condomínio monitorado, ou se você estiver seguindo aquela tarefa específica (mesmo de outro condomínio).\n\n" +
+    `🙋 Alterações nas tarefas que sou responsável: ${pessoa.alertarMinhasTarefas ? "🔔 Ativado" : "🔕 Desativado"}\n` +
+    `✏️ Meu nome nas tarefas: ${pessoa.nomesResponsavel.length > 0 ? pessoa.nomesResponsavel.join(", ") : "(não definido)"}\n` +
+    "Ativado, você recebe um aviso a cada alteração em tarefa em que seu nome é o Responsável: o que mudou, quando e de qual condomínio."
   );
 }
 
@@ -490,12 +547,21 @@ function tecladoMenuAlertas(pessoa: PessoaTelegram): ReplyMarkup {
     inline_keyboard: [
       [
         {
-          text: pessoa.alertasAtivos ? "🔕 Desativar alertas" : "🔔 Ativar alertas",
+          text: pessoa.alertasAtivos
+            ? "🔕 Desativar alertas de atraso"
+            : "🔔 Ativar alertas de atraso",
           callback_data: "alertageral",
         },
       ],
       [{ text: "🏢 Condomínios monitorados", callback_data: "alertacondos" }],
       [{ text: "🎯 Tarefas específicas", callback_data: "alertatarefas" }],
+      [
+        {
+          text: `${pessoa.alertarMinhasTarefas ? "✅" : "⬜"} Alertar em tarefas que sou responsável`,
+          callback_data: "alertaminhas",
+        },
+      ],
+      [{ text: "✏️ Meu nome nas tarefas", callback_data: "alertanomes" }],
       [BOTAO_VOLTAR],
     ],
   };
@@ -792,7 +858,7 @@ type SessaoIndefinidaPendente = {
 // condomínio veio a lista de tarefas sendo marcada/desmarcada.
 type SessaoConfigAlertas = {
   fluxo: "config_alertas";
-  step: "menu" | "condominios" | "tarefas" | "tarefas_condo";
+  step: "menu" | "condominios" | "tarefas" | "tarefas_condo" | "nomes";
   condominioChave?: string;
 };
 
@@ -2240,6 +2306,33 @@ async function tratarCallbackQuery(callbackQuery: {
     return;
   }
 
+  if (data === "alertaminhas" && messageId) {
+    const pessoa = await buscarPessoaTelegram(chatId);
+    if (!pessoa) return;
+    if (pessoa.alertarMinhasTarefas) {
+      await salvarConfigAlertas(pessoa.pageId, { alertarMinhasTarefas: false });
+    } else {
+      // Sem nome definido, usa o do cadastro no bot — o mais provável de ser
+      // o mesmo que aparece em "Responsável" (ex.: "Roberto").
+      const nomes = pessoa.nomesResponsavel.length > 0 ? pessoa.nomesResponsavel : [pessoa.nome];
+      await salvarConfigAlertas(pessoa.pageId, {
+        alertarMinhasTarefas: true,
+        nomesResponsavel: nomes.filter(Boolean),
+      });
+    }
+    await mostrarMenuAlertas(chatId, messageId);
+    return;
+  }
+
+  if (data === "alertanomes") {
+    await salvarSessao(chatId, { fluxo: "config_alertas", step: "nomes" });
+    await responderTelegram(
+      chatId,
+      "✏️ Como seu nome aparece no campo Responsável das tarefas? Escreva em uma mensagem (se aparecer com mais de um nome, separe por vírgula). Ex.: Roberto",
+    );
+    return;
+  }
+
   if (data === "alertacondos" && messageId) {
     await salvarSessao(chatId, { fluxo: "config_alertas", step: "condominios" });
     await mostrarChecklistCondominios(chatId, messageId);
@@ -2653,6 +2746,21 @@ async function tratarMensagem(chatId: number, texto: string): Promise<void> {
 
   if (sessao.fluxo === "atualizar" && sessao.step === "texto") {
     await processarTextoAtualizacao(chatId, sessao, texto);
+    return;
+  }
+
+  if (sessao.fluxo === "config_alertas" && sessao.step === "nomes") {
+    const pessoa = await buscarPessoaTelegram(chatId);
+    const nomes = splitLista(texto);
+    if (!pessoa || nomes.length === 0) {
+      await responderTelegram(
+        chatId,
+        "Não entendi o nome. Escreva como aparece em Responsável, ex.: Roberto",
+      );
+      return;
+    }
+    await salvarConfigAlertas(pessoa.pageId, { nomesResponsavel: nomes });
+    await mostrarMenuAlertas(chatId);
     return;
   }
 
