@@ -1,0 +1,35 @@
+name: Sincronizar Banco de Responsáveis (Notion)
+
+on:
+  schedule:
+    # Todo dia às 09:30 UTC (6h30 no horário de Brasília). Nomes novos que
+    # aparecem numa edição já são cadastrados na hora pelo webhook do Notion;
+    # esta rodada pega o que o webhook não viu e grava o retrato inicial das
+    # tarefas (senão a primeira alteração de cada tarefa não geraria aviso).
+    - cron: "30 9 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "1 = só mostra o que faria, sem gravar nada"
+        required: false
+        default: "0"
+        type: string
+
+concurrency:
+  group: sincronizar-responsaveis
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22: o script importa src/lib/*.ts direto (type stripping).
+          node-version: 22
+      - run: node --experimental-strip-types scripts/sincronizar-responsaveis.mjs
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY_ALERTAS }}
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          SYNC_DRY_RUN: ${{ inputs.dry_run }}
