@@ -107,11 +107,11 @@ export function DemandaSectionTable({ title, description, rows, showCondominio }
                       rel="noreferrer"
                       className="font-medium hover:underline"
                     >
-                      {r.demanda}
+                      {r.demanda || "—"}
                     </a>
                     <div className="text-muted-foreground mt-1 flex items-center gap-1 text-sm">
                       <User className="size-3.5 shrink-0" />
-                      <span className="truncate">{r.responsavel}</span>
+                      <span className="truncate">{r.responsavel || "—"}</span>
                     </div>
                     {showCondominio && (
                       <p className="text-muted-foreground/80 mt-1 text-xs font-medium">
@@ -120,9 +120,11 @@ export function DemandaSectionTable({ title, description, rows, showCondominio }
                     )}
                     <div className="text-muted-foreground/80 mt-1 text-xs">
                       {formatDatePt(r.criadaEm)}
-                      {(r.ultimaAtualizacao || r.historico) && (
-                        <span> · {r.ultimaAtualizacao || r.historico}</span>
-                      )}
+                      {r.ultimaAtualizacao ? (
+                        <span> · {r.ultimaAtualizacao}</span>
+                      ) : r.historico ? (
+                        <span> · Histórico: {r.historico}</span>
+                      ) : null}
                     </div>
                     {(r.dataPrevista || r.concluidoEm) && (
                       <div className="text-muted-foreground/80 mt-1 text-xs">
@@ -205,7 +207,7 @@ export function DemandaSectionTable({ title, description, rows, showCondominio }
                         rel="noreferrer"
                         className="font-medium hover:underline"
                       >
-                        {r.demanda}
+                        {r.demanda || "—"}
                       </a>
                     </TableCell>
                     {showCondominio && (
@@ -214,7 +216,7 @@ export function DemandaSectionTable({ title, description, rows, showCondominio }
                       </TableCell>
                     )}
                     <TableCell className="text-muted-foreground p-1.5 text-center align-top text-xs break-words">
-                      {r.responsavel}
+                      {r.responsavel || "—"}
                     </TableCell>
                     <TableCell className="p-1.5 text-center align-top text-xs">
                       {formatDatePt(r.criadaEm)}
@@ -234,7 +236,12 @@ export function DemandaSectionTable({ title, description, rows, showCondominio }
                       {formatDatePt(r.concluidoEm)}
                     </TableCell>
                     <TableCell className="text-muted-foreground p-1.5 align-top text-xs break-words">
-                      {r.ultimaAtualizacao || r.historico || "—"}
+                      {r.ultimaAtualizacao || "—"}
+                      {!r.ultimaAtualizacao && r.historico && (
+                        <div className="text-muted-foreground/70 mt-0.5 italic">
+                          Histórico: {r.historico}
+                        </div>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

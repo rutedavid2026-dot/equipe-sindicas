@@ -202,14 +202,12 @@ async function fetchDemandasFromDb(
         const p = page.properties ?? {};
         all.push({
           id: page.id,
-          demanda:
-            richText(p["Demanda"]) ||
-            richText(p["Tarefas"]) ||
-            richText(p["TAREFAS"]) ||
-            "(sem título)",
-          responsavel: personValue(p["Pessoa"]) || personValue(p["Responsável"]) || "Não atribuído",
+          demanda: richText(p["Demanda"]) || richText(p["Tarefas"]) || richText(p["TAREFAS"]) || "",
+          // Sem valores inventados pra campo vazio (mesma regra de
+          // scripts/capturar-historico-sheets.mjs) — o relatório mostra "—".
+          responsavel: personValue(p["Pessoa"]) || personValue(p["Responsável"]) || "",
           status: statusValue(p["Status"]) || statusValue(p["Status "]) || "Não iniciado",
-          prioridade: prioridadeValue(p["Prioridade"]) || "Baixa",
+          prioridade: prioridadeValue(p["Prioridade"]) || "",
           condominio: condominioOverride || selectName(p["Condomínio"]) || "—",
           area:
             richText(p["Área"]) ||
@@ -217,13 +215,14 @@ async function fetchDemandasFromDb(
             multiSelectJoined(p["Setor/Demanda"]) ||
             multiSelectJoined(p["Setor"]) ||
             selectName(p["Setor"]) ||
-            "Sem categoria",
-          criadaEm:
-            dateValue(p["Data de Início"]) ??
-            dateValue(p["Início"]) ??
-            createdValue(p["Criada em"]) ??
-            createdValue(p["Criado em"]),
-          ultimaAtualizacao: richText(p["Última Atualização"]) || richText(p["Última Ação"]),
+            "",
+          // Só "Data de Início" (data manual ou created_time automático), sem
+          // cair pra "Criado em"/"Criada em" — igual ao Notion.
+          criadaEm: createdValue(p["Data de Início"]) ?? dateValue(p["Início"]),
+          ultimaAtualizacao:
+            richText(p["Última Atualização"]) ||
+            richText(p["Ùltima Atualização"]) ||
+            richText(p["Última Ação"]),
           historico: richText(p["Histórico"]) || richText(p["Histórico/Evidências"]),
           dataUltimaEdicao: page.last_edited_time,
           url: page.url,

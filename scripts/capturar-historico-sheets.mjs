@@ -384,10 +384,14 @@ function mapPage(page, condominioOverride) {
   const p = page.properties || {};
   return {
     id: page.id,
-    demanda: richText(p["Demanda"]) || richText(p["Tarefas"]) || richText(p["TAREFAS"]) || "(sem titulo)",
-    responsavel: personValue(p["Pessoa"]) || personValue(p["Responsável"]) || "Não atribuído",
+    // Campos vazios no Notion ficam vazios aqui também (sem "(sem titulo)",
+    // "Não atribuído", "Baixa" ou "Sem categoria" inventados): a planilha e o
+    // relatório têm que bater com o Notion, que é a referência. O relatório
+    // mostra "—" pra vazio.
+    demanda: richText(p["Demanda"]) || richText(p["Tarefas"]) || richText(p["TAREFAS"]) || "",
+    responsavel: personValue(p["Pessoa"]) || personValue(p["Responsável"]) || "",
     status: statusValue(p["Status"]) || statusValue(p["Status "]) || "Nao iniciado",
-    prioridade: prioridadeValue(p["Prioridade"]) || "Baixa",
+    prioridade: prioridadeValue(p["Prioridade"]) || "",
     condominio: condominioOverride || selectName(p["Condomínio"]) || "-",
     area:
       richText(p["Área"]) ||
@@ -395,15 +399,16 @@ function mapPage(page, condominioOverride) {
       multiSelectJoined(p["Setor/Demanda"]) ||
       multiSelectJoined(p["Setor"]) ||
       selectName(p["Setor"]) ||
-      "Sem categoria",
-    dataInicio: dateValue(p["Data de Início"]) || dateValue(p["Início"]) || "",
-    criadaEm:
-      dateValue(p["Data de Início"]) ||
-      dateValue(p["Início"]) ||
-      createdValue(p["Criada em"]) ||
-      createdValue(p["Criado em"]) ||
       "",
-    ultimaAtualizacao: richText(p["Última Atualização"]) || richText(p["Última Ação"]),
+    // Só a coluna "Data de Início" (seja data manual ou created_time
+    // automático — Iconic, Porto dos Açores, Bossa Nova e Contemporâneo usam
+    // created_time). Sem cair pra "Criado em"/"Criada em": quando a Data de
+    // Início está vazia no Notion, fica vazia aqui também.
+    dataInicio: createdValue(p["Data de Início"]) || dateValue(p["Início"]) || "",
+    criadaEm: createdValue(p["Data de Início"]) || dateValue(p["Início"]) || "",
+    // "Ùltima Atualização" (com Ù) é a grafia da coluna no Thai Beach.
+    ultimaAtualizacao:
+      richText(p["Última Atualização"]) || richText(p["Ùltima Atualização"]) || richText(p["Última Ação"]),
     historico: richText(p["Histórico"]) || richText(p["Histórico/Evidências"]),
     dataUltimaEdicao: page.last_edited_time,
     url: page.url,
