@@ -183,8 +183,15 @@ export function weekRange(n: number): { start: string; end: string } {
 // em São Paulo já é madrugada seguinte em UTC) fazia essa função contar a
 // semana errada antes da hora (mesma classe de bug corrigida em
 // apps-script/CapturaSemanal.gs).
-function hojeLocalIso(): string {
+export function hojeLocalIso(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date());
+}
+
+// Mesma ideia de hojeLocalIso, mas pra converter qualquer instante (não só
+// "agora") pro dia local em America/Sao_Paulo — usado pra agrupar eventos
+// por dia sem cair no bug de fuso perto da virada.
+export function dataLocalIso(iso: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date(iso));
 }
 
 export function currentWeekNumber(): number {

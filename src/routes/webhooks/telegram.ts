@@ -56,6 +56,7 @@ import {
 const NOTION_VERSION = "2022-06-28";
 const TELEGRAM_DB_ID = "3dae69ba114f812eb8b7f78e6d98c9f5";
 const SESSOES_DB_ID = "3dae69ba114f8170aea1c56a019ed184";
+const USO_BOT_DB_ID = "3ebe69ba114f8179ad50cced10481d20";
 
 // A propriedade "Condomínio" quase sempre é select, mas a Bossa Nova é
 // multi_select — sem isso, criar tarefa lá falharia por incompatibilidade de
@@ -93,6 +94,39 @@ async function notionFetch(path: string, options: RequestInit = {}) {
 
 function truncar(texto: string, tamanho: number): string {
   return texto.length > tamanho ? `${texto.slice(0, tamanho - 1)}…` : texto;
+}
+
+// Grava 1 linha por interação na base "Uso do Bot", pro monitor de uso local
+// (quem manda mensagem, quando, e o quê). O nome vem direto do payload do
+// Telegram (message.from/callback_query.from), sem custo de mais uma
+// consulta ao Notion — pode ser diferente do nome cadastrado na base
+// Telegram (essa é a que a pessoa digitou no autocadastro; aqui é o nome que
+// aparece de verdade no Telegram dela). Nunca deixa uma falha de log
+// derrubar o processamento da mensagem — só registra o erro no console.
+async function registrarUso(
+  chatId: number,
+  pessoa: string,
+  tipo: "texto" | "callback" | "audio" | "foto" | "video" | "documento",
+  resumo: string,
+): Promise<void> {
+  try {
+    await notionFetch("pages", {
+      method: "POST",
+      body: JSON.stringify({
+        parent: { database_id: USO_BOT_DB_ID },
+        properties: {
+          Nome: { title: [{ text: { content: `${pessoa} — ${tipo}` } }] },
+          "Chat ID": { rich_text: [{ text: { content: String(chatId) } }] },
+          Pessoa: { rich_text: [{ text: { content: pessoa } }] },
+          Data: { date: { start: new Date().toISOString() } },
+          Tipo: { select: { name: tipo } },
+          Resumo: { rich_text: [{ text: { content: truncar(resumo, 500) } }] },
+        },
+      }),
+    });
+  } catch (err) {
+    console.error("registrarUso:", err);
+  }
 }
 
 // Botões inline (grudados na própria mensagem) em vez de ReplyKeyboardMarkup
@@ -3025,10 +3059,20 @@ export const Route = createFileRoute("/webhooks/telegram")({
             | {
                 id: string;
                 data?: string;
+                from?: { first_name?: string; username?: string };
                 message?: { chat?: { id?: number }; message_id?: number };
               }
             | undefined;
           if (callbackQuery) {
+            const cbChatId = callbackQuery.message?.chat?.id;
+            if (cbChatId) {
+              await registrarUso(
+                cbChatId,
+                callbackQuery.from?.first_name || callbackQuery.from?.username || "desconhecido",
+                "callback",
+                callbackQuery.data ?? "",
+              );
+            }
             await tratarCallbackQuery(callbackQuery);
             return new Response("ok", { status: 200 });
           }
@@ -3036,6 +3080,7 @@ export const Route = createFileRoute("/webhooks/telegram")({
           const message = update.message as
             | {
                 chat?: { id?: number };
+                from?: { first_name?: string; username?: string };
                 text?: string;
                 photo?: { file_id: string }[];
                 video?: { file_id: string; file_name?: string; mime_type?: string };
@@ -3045,6 +3090,20 @@ export const Route = createFileRoute("/webhooks/telegram")({
               }
             | undefined;
           const chatId = message?.chat?.id;
+          const nomePessoa = message?.from?.first_name || message?.from?.username || "desconhecido";
+
+          if (chatId) {
+            const tipo = message?.photo
+              ? "foto"
+              : message?.video
+                ? "video"
+                : message?.document
+                  ? "documento"
+                  : message?.voice || message?.audio
+                    ? "audio"
+                    : "texto";
+            await registrarUso(chatId, nomePessoa, tipo, message?.text ?? "");
+          }
 
           if (chatId && message?.photo && message.photo.length > 0) {
             await tratarAnexo(chatId, {

@@ -16,7 +16,7 @@ export const CONDOMINIOS: Record<string, string> = {
   "porto dos açores": "3bbe69ba114f80539d80dae69b97eb43",
   "thai beach": "54ce69ba114f834baeb8817600c95070",
   "bossa nova": "3c3e69ba114f8001a9e0d4ddde3f8fb5",
-  "boulevard atlantique": "371dabc8b02d4e40a94a75670e080151",
+  "boulevard atlantique": "0b0e69ba114f826e99fa01c63c07b7f4",
   "palm beach": "3c3e69ba114f81dfbf61dfee1f3bb64d",
   malibu: "3bbe69ba114f8070b9a9e0c43e39e6f6",
   "encantos do mar": "3c3e69ba114f81739c7dfe12c44934cc",
