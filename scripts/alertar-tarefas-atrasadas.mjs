@@ -68,7 +68,6 @@ const CONDOMINIOS = [
   { nome: "Mar Aberto", databaseId: "3c3e69ba114f812c84afc22527799c51" },
   { nome: "Contemporâneo", databaseId: "8a345139cef14f7d8c2777c3e9058675" },
   { nome: "Rivière", databaseId: "3c3e69ba114f81098890f38772e06395" },
-  { nome: "Saint Exupéry", databaseId: "3c3e69ba114f810d93b0e9bc37d51b06" },
   { nome: "La Plage", databaseId: "3c3e69ba114f81f98d72f0337e5cd6cf" },
   { nome: "Absoluto", databaseId: "3c3e69ba114f818a9154c637ec23dd42" },
   { nome: "Dunas do Leste", databaseId: "3c4e69ba114f81bb8b83f4127872e7af" },
