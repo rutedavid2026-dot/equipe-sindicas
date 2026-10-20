@@ -325,6 +325,22 @@ async function notionQuery(token, databaseId) {
   return results;
 }
 
+// A planilha índice às vezes recebe o link da PÁGINA do condomínio em vez do
+// da database de tarefas (La Perle, 2026-10-19): a Notion responde "is a
+// page, not a database". Procura a database dentro da página e usa ela.
+async function resolverDatabaseDaPagina(token, pageId) {
+  try {
+    const res = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children?page_size=100`, {
+      headers: { Authorization: `Bearer ${token}`, "Notion-Version": NOTION_VERSION },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return (json.results || []).find((b) => b.type === "child_database")?.id || null;
+  } catch {
+    return null;
+  }
+}
+
 async function buscarDemandasComTokens(tokens, databaseId, condominio) {
   let ultimoErro = null;
   for (const token of tokens) {
@@ -333,6 +349,17 @@ async function buscarDemandasComTokens(tokens, databaseId, condominio) {
       return pages.map((page) => mapPage(page, condominio));
     } catch (err) {
       ultimoErro = err;
+      if (String(err?.message).includes("is a page, not a database")) {
+        const dbDaPagina = await resolverDatabaseDaPagina(token, databaseId);
+        if (dbDaPagina) {
+          try {
+            const pages = await notionQuery(token, dbDaPagina);
+            return pages.map((page) => mapPage(page, condominio));
+          } catch (err2) {
+            ultimoErro = err2;
+          }
+        }
+      }
     }
   }
   throw ultimoErro;

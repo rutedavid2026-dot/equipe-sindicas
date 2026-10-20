@@ -119,9 +119,29 @@ async function fetchRegistryEntries(): Promise<{ condominio: string; dbId: strin
 // único workspace, e condomínios podem viver em workspaces diferentes —
 // tenta cada token configurado até um conseguir ler a database.
 function getNotionTokens(): string[] {
-  return [process.env.NOTION_API_KEY, process.env.NOTION_API_KEY_2, process.env.NOTION_API_KEY_3].filter(
-    (t): t is string => !!t,
-  );
+  return [
+    process.env.NOTION_API_KEY,
+    process.env.NOTION_API_KEY_2,
+    process.env.NOTION_API_KEY_3,
+  ].filter((t): t is string => !!t);
+}
+
+// A planilha índice às vezes recebe o link da PÁGINA do condomínio em vez do
+// link da database de tarefas (aconteceu com La Perle, 2026-10-19): a Notion
+// responde 400 "is a page, not a database". Em vez de derrubar o condomínio,
+// procura a database dentro da página e usa ela.
+async function resolverDatabaseDaPagina(token: string, pageId: string): Promise<string | null> {
+  try {
+    const res = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children?page_size=100`, {
+      headers: { Authorization: `Bearer ${token}`, "Notion-Version": "2022-06-28" },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const bloco = (json.results ?? []).find((b: { type?: string }) => b.type === "child_database");
+    return bloco?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchDemandasFromDbAnyToken(
@@ -139,6 +159,13 @@ async function fetchDemandasFromDbAnyToken(
   for (const token of tokens) {
     last = await fetchDemandasFromDb(token, dbId, condominioOverride);
     if (!last.error) return last;
+    if (last.error.includes("is a page, not a database")) {
+      const dbDaPagina = await resolverDatabaseDaPagina(token, dbId);
+      if (dbDaPagina) {
+        last = await fetchDemandasFromDb(token, dbDaPagina, condominioOverride);
+        if (!last.error) return last;
+      }
+    }
   }
   return last;
 }
