@@ -37,6 +37,8 @@ export const CONDOMINIOS: Record<string, string> = {
   "residencial saffira": "3c4e69ba114f8136a0bdc40866f167a4",
   moana: "3bbe69ba114f8019a7c7d2f640784338",
   sunset: "3c4e69ba114f81699ccaeb754c5d7305",
+  "la perle": "3c3e69ba114f8350acdf018bb60f4591",
+  "recanto da armação": "bede69ba114f83c1bf6a8153bd68b699",
 };
 
 // Nome de exibição exato (e valor gravado no campo "Condomínio" do Notion)
@@ -76,4 +78,6 @@ export const NOMES_CONDOMINIOS: Record<string, string> = {
   "residencial saffira": "Residencial Saffira",
   moana: "Moana",
   sunset: "SUNSET",
+  "la perle": "La Perle",
+  "recanto da armação": "Recanto da Armação",
 };
