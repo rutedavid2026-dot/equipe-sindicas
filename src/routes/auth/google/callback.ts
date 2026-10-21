@@ -6,9 +6,9 @@ import {
   getGoogleClientId,
   getGoogleClientSecret,
   getSessionConfig,
-  isEmailAllowed,
   type AuthSessionData,
 } from "@/lib/auth";
+import { emailLiberado } from "@/lib/usuarios";
 
 function redirectTo(location: string): Response {
   return new Response(null, { status: 302, headers: { Location: location } });
@@ -82,7 +82,7 @@ export const Route = createFileRoute("/auth/google/callback")({
           return redirectTo(`${origin}/login?error=login_failed&reason=${reason}`);
         }
 
-        if (!isEmailAllowed(claims.email)) {
+        if (!(await emailLiberado(claims.email))) {
           return redirectTo(`${origin}/login?error=denied`);
         }
 

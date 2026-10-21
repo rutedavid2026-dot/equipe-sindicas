@@ -10,6 +10,8 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as VivendasPlanoDeAcaoRouteImport } from './routes/vivendas-plano-de-acao'
+import { Route as UsuariosRouteImport } from './routes/usuarios'
+import { Route as UsoBotRouteImport } from './routes/uso-bot'
 import { Route as RelatorioGeralRouteImport } from './routes/relatorio-geral'
 import { Route as OutrosFollowUpsRouteImport } from './routes/outros-follow-ups'
 import { Route as McpRouteImport } from './routes/mcp'
@@ -33,6 +35,16 @@ import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[
 const VivendasPlanoDeAcaoRoute = VivendasPlanoDeAcaoRouteImport.update({
   id: '/vivendas-plano-de-acao',
   path: '/vivendas-plano-de-acao',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsuariosRoute = UsuariosRouteImport.update({
+  id: '/usuarios',
+  path: '/usuarios',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsoBotRoute = UsoBotRouteImport.update({
+  id: '/uso-bot',
+  path: '/uso-bot',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RelatorioGeralRoute = RelatorioGeralRouteImport.update({
@@ -143,6 +155,8 @@ export interface FileRoutesByFullPath {
   '/mcp': typeof McpRoute
   '/outros-follow-ups': typeof OutrosFollowUpsRoute
   '/relatorio-geral': typeof RelatorioGeralRoute
+  '/uso-bot': typeof UsoBotRoute
+  '/usuarios': typeof UsuariosRoute
   '/vivendas-plano-de-acao': typeof VivendasPlanoDeAcaoRoute
   '/.mcp/list-tools': typeof Char91DotmcpChar93ListToolsRoute
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
@@ -165,6 +179,8 @@ export interface FileRoutesByTo {
   '/mcp': typeof McpRoute
   '/outros-follow-ups': typeof OutrosFollowUpsRoute
   '/relatorio-geral': typeof RelatorioGeralRoute
+  '/uso-bot': typeof UsoBotRoute
+  '/usuarios': typeof UsuariosRoute
   '/vivendas-plano-de-acao': typeof VivendasPlanoDeAcaoRoute
   '/.mcp/list-tools': typeof Char91DotmcpChar93ListToolsRoute
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
@@ -188,6 +204,8 @@ export interface FileRoutesById {
   '/mcp': typeof McpRoute
   '/outros-follow-ups': typeof OutrosFollowUpsRoute
   '/relatorio-geral': typeof RelatorioGeralRoute
+  '/uso-bot': typeof UsoBotRoute
+  '/usuarios': typeof UsuariosRoute
   '/vivendas-plano-de-acao': typeof VivendasPlanoDeAcaoRoute
   '/.mcp/list-tools': typeof Char91DotmcpChar93ListToolsRoute
   '/.well-known/oauth-protected-resource': typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
@@ -212,6 +230,8 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/outros-follow-ups'
     | '/relatorio-geral'
+    | '/uso-bot'
+    | '/usuarios'
     | '/vivendas-plano-de-acao'
     | '/.mcp/list-tools'
     | '/.well-known/oauth-protected-resource'
@@ -234,6 +254,8 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/outros-follow-ups'
     | '/relatorio-geral'
+    | '/uso-bot'
+    | '/usuarios'
     | '/vivendas-plano-de-acao'
     | '/.mcp/list-tools'
     | '/.well-known/oauth-protected-resource'
@@ -256,6 +278,8 @@ export interface FileRouteTypes {
     | '/mcp'
     | '/outros-follow-ups'
     | '/relatorio-geral'
+    | '/uso-bot'
+    | '/usuarios'
     | '/vivendas-plano-de-acao'
     | '/.mcp/list-tools'
     | '/.well-known/oauth-protected-resource'
@@ -279,6 +303,8 @@ export interface RootRouteChildren {
   McpRoute: typeof McpRoute
   OutrosFollowUpsRoute: typeof OutrosFollowUpsRoute
   RelatorioGeralRoute: typeof RelatorioGeralRoute
+  UsoBotRoute: typeof UsoBotRoute
+  UsuariosRoute: typeof UsuariosRoute
   VivendasPlanoDeAcaoRoute: typeof VivendasPlanoDeAcaoRoute
   Char91DotmcpChar93ListToolsRoute: typeof Char91DotmcpChar93ListToolsRoute
   Char91DotwellKnownChar93OauthProtectedResourceRoute: typeof Char91DotwellKnownChar93OauthProtectedResourceRoute
@@ -300,6 +326,20 @@ declare module '@tanstack/react-router' {
       path: '/vivendas-plano-de-acao'
       fullPath: '/vivendas-plano-de-acao'
       preLoaderRoute: typeof VivendasPlanoDeAcaoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/usuarios': {
+      id: '/usuarios'
+      path: '/usuarios'
+      fullPath: '/usuarios'
+      preLoaderRoute: typeof UsuariosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/uso-bot': {
+      id: '/uso-bot'
+      path: '/uso-bot'
+      fullPath: '/uso-bot'
+      preLoaderRoute: typeof UsoBotRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/relatorio-geral': {
@@ -447,6 +487,8 @@ const rootRouteChildren: RootRouteChildren = {
   McpRoute: McpRoute,
   OutrosFollowUpsRoute: OutrosFollowUpsRoute,
   RelatorioGeralRoute: RelatorioGeralRoute,
+  UsoBotRoute: UsoBotRoute,
+  UsuariosRoute: UsuariosRoute,
   VivendasPlanoDeAcaoRoute: VivendasPlanoDeAcaoRoute,
   Char91DotmcpChar93ListToolsRoute: Char91DotmcpChar93ListToolsRoute,
   Char91DotwellKnownChar93OauthProtectedResourceRoute:
