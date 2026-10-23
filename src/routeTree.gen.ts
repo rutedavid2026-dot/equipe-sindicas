@@ -17,6 +17,7 @@ import { Route as OutrosFollowUpsRouteImport } from './routes/outros-follow-ups'
 import { Route as McpRouteImport } from './routes/mcp'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as GerenciarRouteImport } from './routes/gerenciar'
+import { Route as AtividadeRouteImport } from './routes/atividade'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as CondominioRouteImport } from './routes/$condominio'
 import { Route as IndexRouteImport } from './routes/index'
@@ -70,6 +71,11 @@ const LoginRoute = LoginRouteImport.update({
 const GerenciarRoute = GerenciarRouteImport.update({
   id: '/gerenciar',
   path: '/gerenciar',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AtividadeRoute = AtividadeRouteImport.update({
+  id: '/atividade',
+  path: '/atividade',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -150,6 +156,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/$condominio': typeof CondominioRoute
   '/admin': typeof AdminRoute
+  '/atividade': typeof AtividadeRoute
   '/gerenciar': typeof GerenciarRoute
   '/login': typeof LoginRoute
   '/mcp': typeof McpRoute
@@ -174,6 +181,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/$condominio': typeof CondominioRoute
   '/admin': typeof AdminRoute
+  '/atividade': typeof AtividadeRoute
   '/gerenciar': typeof GerenciarRoute
   '/login': typeof LoginRoute
   '/mcp': typeof McpRoute
@@ -199,6 +207,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/$condominio': typeof CondominioRoute
   '/admin': typeof AdminRoute
+  '/atividade': typeof AtividadeRoute
   '/gerenciar': typeof GerenciarRoute
   '/login': typeof LoginRoute
   '/mcp': typeof McpRoute
@@ -225,6 +234,7 @@ export interface FileRouteTypes {
     | '/'
     | '/$condominio'
     | '/admin'
+    | '/atividade'
     | '/gerenciar'
     | '/login'
     | '/mcp'
@@ -249,6 +259,7 @@ export interface FileRouteTypes {
     | '/'
     | '/$condominio'
     | '/admin'
+    | '/atividade'
     | '/gerenciar'
     | '/login'
     | '/mcp'
@@ -273,6 +284,7 @@ export interface FileRouteTypes {
     | '/'
     | '/$condominio'
     | '/admin'
+    | '/atividade'
     | '/gerenciar'
     | '/login'
     | '/mcp'
@@ -298,6 +310,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CondominioRoute: typeof CondominioRoute
   AdminRoute: typeof AdminRoute
+  AtividadeRoute: typeof AtividadeRoute
   GerenciarRoute: typeof GerenciarRoute
   LoginRoute: typeof LoginRoute
   McpRoute: typeof McpRoute
@@ -375,6 +388,13 @@ declare module '@tanstack/react-router' {
       path: '/gerenciar'
       fullPath: '/gerenciar'
       preLoaderRoute: typeof GerenciarRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/atividade': {
+      id: '/atividade'
+      path: '/atividade'
+      fullPath: '/atividade'
+      preLoaderRoute: typeof AtividadeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -482,6 +502,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CondominioRoute: CondominioRoute,
   AdminRoute: AdminRoute,
+  AtividadeRoute: AtividadeRoute,
   GerenciarRoute: GerenciarRoute,
   LoginRoute: LoginRoute,
   McpRoute: McpRoute,

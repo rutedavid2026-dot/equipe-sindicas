@@ -109,6 +109,24 @@ function Dashboard({ email }: { email: string }) {
               →
             </span>
           </Link>
+
+          <Link
+            to="/atividade"
+            className="bg-card hover:border-brand-green group flex items-center justify-between rounded-xl border p-5 shadow-sm transition-colors"
+          >
+            <div>
+              <p className="text-brand-green text-base font-bold tracking-tight">Atividade</p>
+              <p className="text-muted-foreground mt-1 text-xs">
+                O que foi criado ou alterado em cada condomínio (hoje, ontem, semana).
+              </p>
+            </div>
+            <span
+              aria-hidden
+              className="text-brand-green group-hover:translate-x-0.5 transition-transform"
+            >
+              →
+            </span>
+          </Link>
         </div>
       </div>
     </main>
