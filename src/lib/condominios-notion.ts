@@ -38,6 +38,7 @@ export const CONDOMINIOS: Record<string, string> = {
   sunset: "3c4e69ba114f81699ccaeb754c5d7305",
   "la perle": "3c3e69ba114f8350acdf018bb60f4591",
   "recanto da armação": "bede69ba114f83c1bf6a8153bd68b699",
+  mobby: "5f1e69ba114f834a942e81a92ba5890d",
 };
 
 // Nome de exibição exato (e valor gravado no campo "Condomínio" do Notion)
@@ -78,4 +79,5 @@ export const NOMES_CONDOMINIOS: Record<string, string> = {
   sunset: "SUNSET",
   "la perle": "La Perle",
   "recanto da armação": "Recanto da Armação",
+  mobby: "Mobby",
 };

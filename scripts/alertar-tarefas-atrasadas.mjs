@@ -83,6 +83,7 @@ const CONDOMINIOS = [
   { nome: "Sunset", databaseId: "3c4e69ba114f81699ccaeb754c5d7305" },
   { nome: "La Perle", databaseId: "3c3e69ba114f8350acdf018bb60f4591" },
   { nome: "Recanto da Armação", databaseId: "bede69ba114f83c1bf6a8153bd68b699" },
+  { nome: "Mobby", databaseId: "5f1e69ba114f834a942e81a92ba5890d" },
 ];
 
 async function notionFetch(path, options = {}) {

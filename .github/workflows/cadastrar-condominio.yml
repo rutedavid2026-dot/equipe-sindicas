@@ -1,0 +1,27 @@
+name: Cadastrar condomínio na planilha índice
+
+on:
+  workflow_dispatch:
+    inputs:
+      condominio:
+        description: "Nome exato do condomínio (ex.: Mobby)"
+        required: true
+        type: string
+      url:
+        description: "Link da database/página de tarefas no Notion"
+        required: true
+        type: string
+
+jobs:
+  cadastrar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node scripts/cadastrar-condominio.mjs
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+          CONDOMINIO: ${{ inputs.condominio }}
+          NOTION_URL: ${{ inputs.url }}
