@@ -1,6 +1,5 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { getAtividade } from "@/lib/atividade.functions";
 import { pageMeta } from "@/lib/page-meta";
 import { requireAuth } from "@/lib/auth.functions";
@@ -14,14 +13,24 @@ export const Route = createFileRoute("/atividade")({
       "O que foi criado ou alterado em cada condomínio nos últimos dias.",
     ),
   }),
+  // Link filtrado: /atividade?periodo=hoje|ontem|7dias|30dias[&condominio=<id>]
+  // ("ontem" = ontem e hoje; "condominio" = id da planilha índice, ex.: mobby).
+  validateSearch: (s: Record<string, unknown>): { periodo?: Periodo; condominio?: string } => ({
+    periodo: PERIODOS.some((p) => p.chave === s.periodo) ? (s.periodo as Periodo) : undefined,
+    condominio:
+      typeof s.condominio === "string" && s.condominio.trim()
+        ? s.condominio.trim().toLowerCase()
+        : undefined,
+  }),
   component: AtividadePage,
 });
 
-const PERIODOS = [
-  { dias: 1, rotulo: "Hoje" },
-  { dias: 2, rotulo: "Ontem e hoje" },
-  { dias: 7, rotulo: "7 dias" },
-  { dias: 30, rotulo: "30 dias" },
+type Periodo = "hoje" | "ontem" | "7dias" | "30dias";
+const PERIODOS: { chave: Periodo; dias: number; rotulo: string }[] = [
+  { chave: "hoje", dias: 1, rotulo: "Hoje" },
+  { chave: "ontem", dias: 2, rotulo: "Ontem e hoje" },
+  { chave: "7dias", dias: 7, rotulo: "7 dias" },
+  { chave: "30dias", dias: 30, rotulo: "30 dias" },
 ];
 
 function quando(iso: string): string {
@@ -36,14 +45,17 @@ function quando(iso: string): string {
 
 function AtividadePage() {
   const { user } = Route.useRouteContext();
-  const [dias, setDias] = useState(2);
+  const { periodo = "ontem", condominio: filtro } = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
+  const dias = PERIODOS.find((p) => p.chave === periodo)!.dias;
   const { data: result, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["atividade", dias],
     queryFn: () => getAtividade({ data: { dias } }),
     staleTime: 60_000,
   });
 
-  const condos = result?.data ?? [];
+  const todos = result?.data ?? [];
+  const condos = filtro ? todos.filter((c) => c.id.toLowerCase() === filtro) : todos;
   const comAtividade = condos
     .filter((c) => c.itens.length > 0)
     .sort((a, b) => b.itens[0].quando.localeCompare(a.itens[0].quando));
@@ -71,9 +83,9 @@ function AtividadePage() {
           {PERIODOS.map((p) => (
             <button
               key={p.dias}
-              onClick={() => setDias(p.dias)}
+              onClick={() => navigate({ search: (prev) => ({ ...prev, periodo: p.chave }) })}
               className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                dias === p.dias
+                p.chave === periodo
                   ? "bg-brand-green border-transparent text-white"
                   : "bg-card hover:border-brand-green"
               }`}
@@ -81,6 +93,14 @@ function AtividadePage() {
               {p.rotulo}
             </button>
           ))}
+          {filtro && (
+            <button
+              onClick={() => navigate({ search: (prev) => ({ ...prev, condominio: undefined }) })}
+              className="bg-card hover:border-brand-green rounded-full border px-3 py-1 text-xs"
+            >
+              {condos[0]?.condominio ?? filtro} ✕ ver todos
+            </button>
+          )}
           <button
             onClick={() => refetch()}
             className="text-muted-foreground hover:text-brand-green ml-auto text-xs"
@@ -115,7 +135,12 @@ function AtividadePage() {
             {comAtividade.map((c) => (
               <section key={c.id} className="bg-card rounded-xl border shadow-sm">
                 <h2 className="text-brand-green border-b px-5 py-3 text-sm font-bold">
-                  {c.condominio}
+                  <button
+                    onClick={() => navigate({ search: (prev) => ({ ...prev, condominio: c.id }) })}
+                    className="hover:underline"
+                  >
+                    {c.condominio}
+                  </button>
                   <span className="text-muted-foreground ml-2 text-xs font-normal">
                     {c.itens.filter((i) => i.tipo === "nova").length} novas ·{" "}
                     {c.itens.filter((i) => i.tipo === "editada").length} editadas
