@@ -2,11 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { getAtividade } from "@/lib/atividade.functions";
 import { pageMeta } from "@/lib/page-meta";
-import { requireAuth } from "@/lib/auth.functions";
+import { requireAuthComPreview } from "@/lib/auth.functions";
 import { Masthead } from "@/components/report/Masthead";
 
 export const Route = createFileRoute("/atividade")({
-  beforeLoad: requireAuth,
+  beforeLoad: requireAuthComPreview,
   head: () => ({
     meta: pageMeta(
       "Equipe Síndicas — Atividade",

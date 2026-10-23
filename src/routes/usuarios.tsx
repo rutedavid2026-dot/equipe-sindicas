@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { addUsuario, getUsuarios, removeUsuario } from "@/lib/usuarios.functions";
 import { pageMeta } from "@/lib/page-meta";
-import { requireAuth } from "@/lib/auth.functions";
+import { requireAuthComPreview } from "@/lib/auth.functions";
 import {
   Table,
   TableHeader,
@@ -15,7 +15,7 @@ import {
 import { Masthead } from "@/components/report/Masthead";
 
 export const Route = createFileRoute("/usuarios")({
-  beforeLoad: requireAuth,
+  beforeLoad: requireAuthComPreview,
   head: () => ({
     meta: pageMeta(
       "Equipe Síndicas — Usuários",
