@@ -126,6 +126,30 @@ export async function adicionarUsuario(nome: string, email: string, por: string)
   cache.clear();
 }
 
+// Só troca o nome (o e-mail é a chave e não muda). Se o e-mail ainda não tem
+// linha na aba — caso dos liberados só pela env ALLOWED_EMAILS — cria uma
+// pra guardar o nome; eles continuam "fixos" na tela.
+export async function renomearUsuario(email: string, nome: string, por: string): Promise<void> {
+  const tk = await token();
+  const linhas = await lerLinhas(tk);
+  const alvo = linhas.find((l) => l.usuario.email === email);
+  if (alvo) {
+    await sheetsFetch(
+      tk,
+      `/values/${encodeURIComponent(ABA)}!A${alvo.linha}?valueInputOption=RAW`,
+      { method: "PUT", body: JSON.stringify({ values: [[nome]] }) },
+    );
+  } else {
+    const agora = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+    await sheetsFetch(
+      tk,
+      `/values/${encodeURIComponent(ABA)}!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      { method: "POST", body: JSON.stringify({ values: [[nome, email, por, agora, "SIM"]] }) },
+    );
+  }
+  cache.clear();
+}
+
 export async function removerUsuario(email: string): Promise<void> {
   const tk = await token();
   const linhas = await lerLinhas(tk);

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { addUsuario, getUsuarios, removeUsuario } from "@/lib/usuarios.functions";
+import { addUsuario, editUsuarioNome, getUsuarios, removeUsuario } from "@/lib/usuarios.functions";
 import { pageMeta } from "@/lib/page-meta";
 import { requireAuthComPreview } from "@/lib/auth.functions";
 import {
@@ -38,6 +38,16 @@ function UsuariosPage() {
   const [email, setEmail] = useState("");
   const [erro, setErro] = useState<string | null>(null);
   const [salvando, setSalvando] = useState(false);
+  const [editando, setEditando] = useState<string | null>(null);
+  const [nomeEditado, setNomeEditado] = useState("");
+
+  async function salvarNome(alvo: string) {
+    setErro(null);
+    const r = await editUsuarioNome({ data: { email: alvo, nome: nomeEditado } });
+    if (!r.ok) return setErro(r.error);
+    setEditando(null);
+    await qc.invalidateQueries({ queryKey: QUERY_KEY });
+  }
 
   async function adicionar(e: React.FormEvent) {
     e.preventDefault();
@@ -124,7 +134,47 @@ function UsuariosPage() {
               <TableBody>
                 {usuarios.map((u) => (
                   <TableRow key={u.email}>
-                    <TableCell>{u.nome || "—"}</TableCell>
+                    <TableCell>
+                      {editando === u.email ? (
+                        <span className="flex items-center gap-2">
+                          <input
+                            autoFocus
+                            value={nomeEditado}
+                            onChange={(e) => setNomeEditado(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") salvarNome(u.email);
+                              if (e.key === "Escape") setEditando(null);
+                            }}
+                            className="bg-background w-32 rounded-md border px-2 py-1 text-sm"
+                          />
+                          <button
+                            onClick={() => salvarNome(u.email)}
+                            className="text-brand-green text-xs font-semibold hover:underline"
+                          >
+                            Salvar
+                          </button>
+                          <button
+                            onClick={() => setEditando(null)}
+                            className="text-muted-foreground text-xs hover:underline"
+                          >
+                            Cancelar
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-2">
+                          {u.nome || "—"}
+                          <button
+                            onClick={() => {
+                              setEditando(u.email);
+                              setNomeEditado(u.nome);
+                            }}
+                            className="text-muted-foreground hover:text-brand-green text-xs hover:underline"
+                          >
+                            Editar
+                          </button>
+                        </span>
+                      )}
+                    </TableCell>
                     <TableCell>{u.email}</TableCell>
                     <TableCell className="text-muted-foreground text-xs">
                       {u.fixo ? "Liberado na configuração" : u.adicionadoEm}
